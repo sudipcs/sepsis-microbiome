@@ -1,0 +1,1463 @@
+---
+title: "disc_selection"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2025-01-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("phyloseq")
+
+if(!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("Maaslin2")
+
+install.packages("Matrix")
+install.packages("pgirmess")
+install.packages("agricolae")
+install.packages("ggpubr")
+install.packages("gt")
+install.packages("FSA")
+```
+
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(ggpubr)
+library(data.table)
+library(cowplot)
+library(Maaslin2)
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(FSA)
+
+```
+
+Obtain phyloseq object:
+```{r}
+phy=readRDS("phyloseq_val_one.rds")
+phy
+```
+
+#Sample Summary:
+
+Counts per sample:
+```{r}
+#sum the reads:
+sdt = data.table(as(sample_data(phy), "data.frame"),
+               TotalReads = sample_sums(phy), keep.rownames = TRUE)
+setnames(sdt, "rn", "SampleID")
+
+#create a plot of the sequencing depth:
+ggplot(sdt, aes(TotalReads)) + 
+  geom_histogram() + 
+  labs(x = "Total Reads", y = "Count", title = "Sequencing Depth")+
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0, 15, 2.5))+
+  theme_minimal()
+
+#save plot:
+ggsave(path = "figs", filename = "seq_depth.png", height = 5, width = 8)
+
+```
+
+Remove those samples with less than 10000 reads:
+```{r}
+phy.rrf=rarefy_even_depth(phy, 10000, replace=FALSE, rngseed = 3)
+```
+... taxa (OTUs) were removed because once the samples were removed, they were no longer present in the data anymore. 6 samples were below 10000 so were removed.
+
+New samples per individual now:
+```{r}
+#extarct the number of samples per individual:
+num_of_samples=data.frame(table(sample_data(phy.rrf)[,"Patient.ID"]))
+num_of_samples$Samplename=paste0("Ind ", num_of_samples$Patient.ID)
+
+#Create chart:
+ggplot(num_of_samples, aes(x= Samplename, y = Freq)) + 
+  geom_bar(position='stack', stat='identity')+
+  scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2))+
+  theme_minimal() +
+  labs(x='Patient ID', y='Number of Samples')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_text(margin = margin(t = 15)),
+        axis.title.y = element_text(hjust = 0.5, margin = margin(r = 10)))
+
+ggsave(path = "figs", filename = "sample_num_disc.png", height = 5, width = 8)
+```
+
+Statistics of the samples:
+```{r}
+print(nrow(num_of_samples)) # number of sample
+range(num_of_samples$Freq)
+median(num_of_samples$Freq)
+```
+#Data Sparsity:
+Remove any features where there are greater than 80% sparsity:
+```{r}
+#Extract otu_table and make as a dataframe:
+otu_table_df <- as.data.frame(otu_table(phy.rrf))
+
+#Count the percentage of zero values for each feature:
+sparsity <- c(rep(0,nrow(otu_table_df))) #empty vectors
+#calculate the percentage of zeros for each cluster type for all the samples:
+for (i in 1:nrow(otu_table_df)) {
+    sparsity[i] <- (sum(otu_table_df[i,] == 0)/ncol(otu_table_df))*100
+}
+
+#Plot a histogram of sparsity:
+sparsity_df <- as.data.frame(sparsity)
+ggplot(sparsity_df, aes(x=sparsity))+
+  geom_histogram()+
+  theme_minimal()+
+  labs(x= "Sparsity (%)", y= "Frequency", title = "Sparsity levels of each OTU across all samples")
+
+ggsave(path = "figs", filename = "sparsity_disc.png", height = 5, width = 7)
+```
+
+```{r}
+#Remove the features that are present in less than 3 samples:
+phy.red = filter_taxa(phy.rrf, function(x) sum(x > 0) > (0.02 * length(x)), TRUE) 
+phy.red
+```
+#Extract the reduced phyloseq object:
+Save object:
+```{r}
+saveRDS(phy.red, 'phyloseq_disc_red.rds')
+```
+
+#Alpha Diversity Estimates:
+
+##Alpha diversity for All LOS samples vs all control samples:
+Plot across groups:
+```{r}
+#obtain alpha diversity metrics:
+# Suppose your plot_richness object:
+p <- plot_richness(phy.red, "Timeperiods", "DiseaseStatus",
+                   measures = c("Observed","Shannon","Chao1"))
+
+# Recode DiseaseStatus for clarity:
+p$data$DiseaseStatus <- factor(
+  p$data$DiseaseStatus,
+  levels = c(0, 1),
+  labels = c("Control", "Sepsis")
+)
+
+# Observed Richness
+subp1 <- ggplot(p$data[p$data$variable == "Observed", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+ # stat_compare_means(method = "wilcox.test") +  # Add p-value
+  theme_bw() +
+  ylab("Observed Richness") +
+  xlab("") +   # Disease State (all samples) , change if need
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+# Shannon
+subp2 <- ggplot(p$data[p$data$variable == "Shannon", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+ # stat_compare_means(method = "wilcox.test") +
+  theme_bw() +
+  ylab("Shannon Index") +
+  xlab("Disease State (all samples)") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+# Chao1
+subp3 <- ggplot(p$data[p$data$variable == "Chao1", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+ # stat_compare_means(method = "wilcox.test") +
+  theme_bw() +
+  ylab("Chao1") +
+  xlab("") +   # Disease State (all samples) , change if need
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+plot_grid(subp1, subp2, subp3, ncol = 3, labels = c("A", "B", "C"))
+
+ggsave("figs/1a_alpha_LOS_vs_Control.png", height = 5, width = 12)
+
+
+```
+## Show individual samples and provide p-value
+```{r}
+# ---- 1. Save p-values to a file ----
+metrics <- c("Observed", "Shannon", "Chao1")
+pvals <- data.frame(Metric = metrics, P_value = NA)
+
+for (m in metrics) {
+  dat <- p$data[p$data$variable == m, ]
+  test <- wilcox.test(value ~ DiseaseStatus, data = dat)
+  pvals[pvals$Metric == m, "P_value"] <- test$p.value
+}
+
+# Save the p-values table
+write.csv(pvals, "1a_alpha_diversity_pvalues.csv", row.names = FALSE)
+
+```
+
+
+
+
+```{r}
+
+
+library(ggpubr)   # for statistical tests
+library(cowplot)  # for plot_grid
+library(dplyr)
+
+# --------------------------
+# 1. Compute p-values & save to file
+# --------------------------
+metrics <- c("Observed", "Shannon", "Chao1")
+pvals <- data.frame(
+  Metric      = metrics,
+  Test        = "Wilcoxon rank-sum",
+  W_statistic = NA,
+  P_value     = NA,
+  N_control   = NA,
+  N_sepsis    = NA
+)
+
+for (m in metrics) {
+  dat <- p$data %>% filter(variable == m)
+  
+  # Sample sizes
+  pvals[pvals$Metric == m, "N_control"] <- sum(dat$DiseaseStatus == "Control")
+  pvals[pvals$Metric == m, "N_sepsis"]  <- sum(dat$DiseaseStatus == "Sepsis")
+  
+  # Test
+  test <- wilcox.test(value ~ DiseaseStatus, data = dat)
+  pvals[pvals$Metric == m, "W_statistic"] <- test$statistic
+  pvals[pvals$Metric == m, "P_value"]     <- test$p.value
+}
+
+# Save results
+write.csv(pvals, "alpha_diversity_pvalues_v2.csv", row.names = FALSE)
+
+
+# --------------------------
+# 2. Create plots with individual points
+# --------------------------
+make_alpha_plot <- function(metric, y_label, x_label = "") {
+  ggplot(p$data %>% filter(variable == metric),
+         aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+    geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+    geom_jitter(aes(color = DiseaseStatus),
+                size = 2, width = 0.2, alpha = 0.8) +
+    theme_bw() +
+    ylab(y_label) +
+    xlab(x_label) +
+    scale_fill_brewer(palette = "Dark2") +
+    scale_color_brewer(palette = "Dark2") +
+    theme(legend.position = "none")
+}
+
+subp1 <- make_alpha_plot("Observed", "Observed Richness")
+subp2 <- make_alpha_plot("Shannon", "Shannon Index", "Disease State (all samples)")
+subp3 <- make_alpha_plot("Chao1", "Chao1")
+
+# --------------------------
+# 3. Combine plots
+# --------------------------
+plot_grid(subp1, subp2, subp3, ncol = 3, labels = c("A", "B", "C"))
+
+
+```
+# editing above this
+
+# 1b
+
+##Alpha diversity by timepoint: new
+Plot across groups:
+```{r}
+
+# Use same plot_richness
+p <- plot_richness(phy.red, "Timeperiods", "DiseaseStatus",
+                   measures = c("Observed", "Shannon", "Chao1"))
+
+# Recode DiseaseStatus
+p$data$DiseaseStatus <- factor(
+  p$data$DiseaseStatus,
+  levels = c(0, 1),
+  labels = c("Control", "Sepsis")
+)
+# Reorder Timeperiods: D → C → B → A
+p$data$Timeperiods <- factor(
+  p$data$Timeperiods,
+  levels = c("D", "C", "B", "A")
+)
+
+# Shared position dodge for side-by-side boxes
+pd <- position_dodge(width = 0.75)
+
+# Observed Richness: grouped by DiseaseStatus within Timeperiods
+subp1 <- ggplot(p$data[p$data$variable == "Observed", ],
+                aes(x = Timeperiods, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, position = pd, outlier.shape = NA) +
+  geom_jitter(aes(color = DiseaseStatus), size = 2,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75)) +
+#  stat_compare_means(aes(group = DiseaseStatus), method = "wilcox.test") +
+  theme_bw() +
+  ylab("Observed Richness") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "right")
+
+# Shannon Index
+subp2 <- ggplot(p$data[p$data$variable == "Shannon", ],
+                aes(x = Timeperiods, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, position = pd, outlier.shape = NA) +
+  geom_jitter(aes(color = DiseaseStatus), size = 2,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75)) +
+ # stat_compare_means(aes(group = DiseaseStatus), method = "wilcox.test") +
+  theme_bw() +
+  ylab("Shannon Index") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "right")
+
+# Chao1 Index
+subp3 <- ggplot(p$data[p$data$variable == "Chao1", ],
+                aes(x = Timeperiods, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, position = pd, outlier.shape = NA) +
+  geom_jitter(aes(color = DiseaseStatus), size = 2,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75)) +
+ # stat_compare_means(aes(group = DiseaseStatus), method = "wilcox.test") +
+  theme_bw() +
+  ylab("Chao1") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "right")
+
+
+#plot_grid(subp1, subp2, subp3, ncol = 3, labels = c("A", "B", "C"))
+
+# Make each plot as you have:
+print(subp1)
+print(subp2)
+print(subp3)
+# Save all 3 figures to PNG
+ggsave("figs/1bsup_Observed_Richness.png", subp1, width = 6, height = 5, dpi = 300)
+ggsave("figs/1bsup_Shannon_Index.png", subp2, width = 6, height = 5, dpi = 300)
+ggsave("figs/1bsup_Chao1.png", subp3, width = 6, height = 5, dpi = 300)
+
+
+
+
+```
+
+## need p values for  above code
+
+```{r}
+
+# Metrics to test
+metrics <- c("Observed", "Shannon", "Chao1")
+
+# Data frame to store results
+pvals <- data.frame(
+  Metric       = character(),
+  Timeperiod   = character(),
+  W_statistic  = numeric(),
+  P_value      = numeric(),
+  N_control    = numeric(),
+  N_sepsis     = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over metrics and time periods
+for (m in metrics) {
+  for (tp in levels(p$data$Timeperiods)) {
+    dat <- p$data %>%
+      filter(variable == m, Timeperiods == tp)
+
+    # Ensure we have both groups before testing
+    if (length(unique(dat$DiseaseStatus)) == 2) {
+      test <- wilcox.test(value ~ DiseaseStatus, data = dat)
+
+      pvals <- rbind(pvals, data.frame(
+        Metric      = m,
+        Timeperiod  = tp,
+        W_statistic = unname(test$statistic),
+        P_value     = test$p.value,
+        N_control   = sum(dat$DiseaseStatus == "Control"),
+        N_sepsis    = sum(dat$DiseaseStatus == "Sepsis"),
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+
+# Save to CSV
+write.csv(pvals, "1b_alpha_diversity_pvalues_by_timeperiod.csv", row.names = FALSE)
+```
+## end
+
+
+
+##Test for significance:
+The kruskall-wallace test will be used to compare this.
+```{r}
+#Richness- compare across all time periods:
+kruskal.test(data=subp1$data, value ~ Timeperiods)
+#show(subp1$data)
+```
+Pairwise:
+```{r}
+#kruskal pairwise comparison:
+kruskalmc(subp1$data$value, subp1$data$Timeperiods)
+krus<-with(subp1$data,kruskal(value,Timeperiods,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#wilcox pairwise comparison:
+pairwise_result <- pairwise.wilcox.test(subp1$data$value, subp1$data$Timeperiods, p.adjust.method = "BH")
+print(pairwise_result)
+```
+
+
+```{r}
+#Shannon- compare across timeperiods:
+kruskal.test(data=subp2$data, value ~ Timeperiods) 
+```
+Pairwise:
+```{r}
+#kruskal pairwise comparison:
+kruskalmc(subp2$data$value, subp2$data$Timeperiods)
+krus<-with(subp2$data,kruskal(value,Timeperiods,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#wilcox pairwise comparison:
+pairwise_result <- pairwise.wilcox.test(subp2$data$value, subp2$data$Timeperiods, p.adjust.method = "BH")
+print(pairwise_result)
+```
+
+
+```{r}
+#Chao1- compare across timeperiods:
+kruskal.test(data=subp3$data, value ~ Timeperiods)
+```
+Pairwise:
+```{r}
+#kruskal pairwise comparison:
+kruskalmc(subp3$data$value, subp3$data$Timeperiods)
+krus<-with(subp3$data,kruskal(value,Timeperiods,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#wilcox pairwise comparison:
+pairwise_result <- pairwise.wilcox.test(subp3$data$value, subp3$data$Timeperiods, p.adjust.method = "BH")
+print(pairwise_result)
+```
+
+There is no significant difference between any of the alpha diversity metrics and the time period of the samples. There are no differences between each pairwise comparison either.
+
+##Alpha Diversity for Disease vs Controls:
+Turn disease status into string outcome:
+```{r}
+p$data$DiseaseStatus <- ifelse(p$data$DiseaseStatus == 1, "Disease", "Control")
+table(p$data$DiseaseStatus, useNA = "ifany") # not needed
+```
+
+Significant tests:
+```{r}
+#Richness- compare across disease status:
+kruskal.test(data=subp1$data, value ~ DiseaseStatus)
+wilcox.test(data=subp1$data, value ~ DiseaseStatus)
+```
+```{r}
+#Shannon-compare across disease status:
+kruskal.test(data=subp2$data, value ~ DiseaseStatus)
+wilcox.test(data=subp2$data, value ~ DiseaseStatus)
+```
+```{r}
+#Chao1-compare across disease status:
+kruskal.test(data=subp3$data, value ~ DiseaseStatus)
+wilcox.test(data=subp3$data, value ~ DiseaseStatus)
+```
+## 2a - Alpha Diversity for S.Aureus vs gram neg vs healthy:
+Turn into a string response:
+```{r}
+phy.red <- readRDS("phyloseq_disc_red.rds") # need to change
+p <- plot_richness(phy.red, "Timeperiods", "DiseaseCausative",
+                   measures = c("Observed", "Shannon", "Chao1"))
+#========================
+p$data$DiseaseCausative[p$data$DiseaseCausative == 1 ] <- "S. aureus LOS"  # changed 
+p$data$DiseaseCausative[p$data$DiseaseCausative == 2 ] <- "Gut-derived LOS"  # changed 
+p$data$DiseaseCausative[p$data$DiseaseCausative == 0 ] <- "Control"  # changed 
+
+# need to runs once # Ensure factor levels are ordered and labelled correctly
+p$data$DiseaseCausative <- factor(
+  p$data$DiseaseCausative,
+  levels = c("Control", "Gut-derived LOS", "S. aureus LOS"),
+  labels = c("Controls", "Gut-derived\nLOS", "S. aureus\nLOS")
+)
+
+
+```
+## done this  S. aureus LOS ,  Gut-derived LOS  
+Plot the groups:
+```{r}
+
+#plot observed metric across type of LOS:
+subp1 = ggplot(data=p$data[p$data$variable=="Observed",], aes(x=DiseaseCausative, y=value, fill= DiseaseCausative))+
+geom_boxplot(alpha=0.3)+
+geom_point(size=2) + theme_bw()+ ylab("Richness")+ xlab("Subgroup")+
+scale_fill_brewer(palette="Dark2")+ theme(legend.position="none")+
+facet_wrap(~variable)
+
+#plot shannon index across type of LOS:
+subp2 = ggplot(data=p$data[p$data$variable=="Shannon",], aes(x=DiseaseCausative, y=value, fill=DiseaseCausative))+
+geom_boxplot(alpha=0.3)+
+geom_point(size=2) + theme_bw()+ ylab("Shannon index")+xlab("Subgroup")+
+scale_fill_brewer(palette="Dark2")+ theme(legend.position="none")+
+facet_wrap(~variable)
+
+#plot chao index across type of LOS:
+subp3 = ggplot(data=p$data[p$data$variable=="Chao1",], aes(x=DiseaseCausative, y=value, fill= DiseaseCausative))+
+geom_boxplot(alpha=0.3)+
+geom_point(size=2) + theme_bw()+ ylab("Chao1")+xlab("Subgroup")+
+scale_fill_brewer(palette="Dark2")+theme(legend.position="none")+
+facet_wrap(~variable)
+
+#combine all into one plot:
+plot_grid(subp1,subp2,subp3,ncol=3) # , rel_widths = c(1.1, 1.1, 1.1) # check the file for beter visualization
+ggsave(path = "figs", filename = "2afig.png", height = 5, width = 12) # done
+
+##
+
+
+```
+# p value
+```{r}
+#  its for all 3 comparisons
+
+library(dplyr)
+library(rstatix)
+
+# After your relabeling code for p$data$DiseaseCausative
+# Ensure it's a clean factor with no numeric leftovers
+p$data <- p$data %>%
+  mutate(DiseaseCausative = droplevels(DiseaseCausative))
+
+# Kruskal–Wallis p-values for each metric
+kw_results <- p$data %>%
+  group_by(variable) %>%
+  kruskal_test(value ~ DiseaseCausative) %>%
+  select(variable, kruskal_p = p)
+
+# Pairwise Wilcoxon p-values with BH adjustment for each metric
+pairwise_results <- p$data %>%
+  group_by(variable) %>%
+  pairwise_wilcox_test(value ~ DiseaseCausative, p.adjust.method = "BH") %>%
+  select(variable, group1, group2, p.adj)
+
+# Combine for a clean output
+list(
+  "Kruskal–Wallis (overall)" = kw_results,
+  "Pairwise Wilcoxon (BH adj)" = pairwise_results
+)
+
+
+# Merge KW and pairwise into a wide table
+pairwise_wide <- pairwise_results %>%
+  unite(Comparison, group1, group2, sep = " vs ") %>%
+  pivot_wider(names_from = Comparison, values_from = p.adj)
+
+final_table <- left_join(pairwise_wide, kw_results, by = "variable")
+
+# Pretty print
+final_table %>%
+  gt() %>%
+  tab_header(title = "Alpha Diversity – P-values") %>%
+  fmt_number(columns = where(is.numeric), decimals = 4)
+
+
+
+
+```
+
+
+```{r}
+library(dplyr)
+library(gridExtra)
+library(grid)
+# its for pair wise  comparisons
+
+# Extract data
+df <- p$data
+
+# Define group names (adjust according to your data)
+control_group <- "Controls"
+sepsis_groups <- c("Gut-derived\nLOS", "S. aureus\nLOS")
+
+# Loop over metrics and sepsis subgroups
+results <- lapply(unique(df$variable), function(metric) {
+  lapply(sepsis_groups, function(sepsis_group) {
+    subdf <- df %>%
+      filter(variable == metric,
+             DiseaseCausative %in% c(control_group, sepsis_group))
+    
+    # Run Wilcoxon rank-sum
+    test <- wilcox.test(value ~ DiseaseCausative, data = subdf, exact = FALSE)
+    
+    data.frame(
+      Metric = metric,
+      Timeperiod = paste(control_group, "vs", sepsis_group),
+      W_statistic = test$statistic,
+      P_value = test$p.value,
+      N_control = sum(subdf$DiseaseCausative == control_group),
+      N_sepsis = sum(subdf$DiseaseCausative == sepsis_group)
+    )
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+
+
+# Save results to CSV
+write.csv(results, "2a_alpha_diversity_pvalues.csv", row.names = FALSE)
+
+results
+
+```
+
+# end p value
+
+
+
+
+
+
+Significance tests:
+```{r}
+#Richness-compare across LOS type:
+kruskal.test(data=subp1$data, value ~ DiseaseCausative)
+```
+Pairwise:
+```{r}
+#kruskal pairwise comparison:
+kruskalmc(subp1$data$value, subp1$data$DiseaseCausative)
+krus<-with(subp1$data,kruskal(value,DiseaseCausative,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#wilcox pairwise comparison:
+pairwise_result <- pairwise.wilcox.test(subp1$data$value, subp1$data$DiseaseCausative, p.adjust.method = "BH")
+print(pairwise_result)
+```
+
+
+```{r}
+#Shannon- compare across LOS types:
+kruskal.test(data=subp2$data, value ~ DiseaseCausative)
+```
+Pairwise:
+```{r}
+#pairwise kruskal:
+kruskalmc(subp2$data$value, subp2$data$DiseaseCausative)
+krus<-with(subp2$data,kruskal(value,DiseaseCausative,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#pairwsie wilcox:
+pairwise_result <- pairwise.wilcox.test(subp2$data$value, subp2$data$DiseaseCausative, p.adjust.method = "BH")
+print(pairwise_result)
+```
+```{r}
+#Chao1-compare across LOS type:
+kruskal.test(data=subp3$data, value ~ DiseaseCausative)
+```
+Pairwise:
+```{r}
+#kruskal pairwise:
+kruskalmc(subp3$data$value, subp3$data$DiseaseCausative)
+krus<-with(subp3$data,kruskal(value,DiseaseCausative,group=FALSE,p.adj="BH"))
+krus$comparison
+
+#wilcox pairwise:
+pairwise_result <- pairwise.wilcox.test(subp3$data$value, subp3$data$DiseaseCausative, p.adjust.method = "BH")
+print(pairwise_result)
+```
+# done 2b Disease type separated by time period:
+#  
+
+```{r}
+# Reorder Timeperiods: D → A
+p$data$Timeperiods <- factor(p$data$Timeperiods, levels = c("D", "C", "B", "A"))
+
+# Reorder DiseaseCausative: Control first
+p$data$DiseaseCausative <- factor(p$data$DiseaseCausative,
+                                  levels = c("Control", setdiff(unique(p$data$DiseaseCausative), "Control")))
+
+base_theme <- theme_bw(base_size = 14) +  # larger base font size
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    legend.title = element_blank(),  # remove legend title
+    legend.text = element_text(face = "bold")
+  )
+
+# Plot 1: Observed
+p1 <- ggplot(p$data[p$data$variable == "Observed",],
+             aes(x = Timeperiods, y = value, fill = DiseaseCausative)) +
+  geom_boxplot(alpha = 0.3, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+              alpha = 0.6, size = 1.5) +
+  xlab("Time Period") + ylab("Observed Richness") +
+  scale_fill_brewer(palette = "Dark2") +
+  base_theme
+
+# Plot 2: Shannon
+p2 <- ggplot(p$data[p$data$variable == "Shannon",],
+             aes(x = Timeperiods, y = value, fill = DiseaseCausative)) +
+  geom_boxplot(alpha = 0.3, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+              alpha = 0.6, size = 1.5) +
+  xlab("Time Period") + ylab("Shannon Index") +
+  scale_fill_brewer(palette = "Dark2") +
+  base_theme
+
+# Plot 3: Chao1
+p3 <- ggplot(p$data[p$data$variable == "Chao1",],
+             aes(x = Timeperiods, y = value, fill = DiseaseCausative)) +
+  geom_boxplot(alpha = 0.3, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+              alpha = 0.6, size = 1.5) +
+  xlab("Time Period") + ylab("Chao1 Index") +
+  scale_fill_brewer(palette = "Dark2") +
+  base_theme
+
+
+plot_grid(p1)
+ggsave(path = "figs", filename ="2bObserved_Richness.png", plot = p1, width = 8, height = 6, dpi = 300)
+ggsave(path = "figs", filename ="2bShannon_Index.png", plot = p2, width = 8, height = 6, dpi = 300)
+ggsave(path = "figs", filename ="2bChao1_Index.png", plot = p3, width = 8, height = 6, dpi = 300)
+
+#ggsave(path = "figs", filename = "alpha_cause_time.png", height = 7, width = 10)
+
+
+```
+
+## p value for run above code then below
+
+```{r}
+library(dplyr)
+
+pval_df <- p$data %>%
+  group_by(Timeperiods, variable) %>%
+  summarise(
+    p_value = if (length(unique(DiseaseCausative)) > 1) {
+      tryCatch(
+        kruskal.test(value ~ DiseaseCausative)$p.value,
+        error = function(e) NA_real_
+      )
+    } else {
+      NA_real_
+    },
+    .groups = "drop"
+  )
+
+# Save even if NA
+#write.csv(pval_df, "alpha_diversity_pvalues.csv", row.names = FALSE)
+
+
+# Save to CSV
+#write.csv(pval_df, "alpha_diversity_pvalues.csv", row.names = FALSE)
+
+# Save to CSV
+write.csv(pval_df, "2b_pvalue_results_metrics1.csv", row.names = FALSE)
+
+
+## end
+```
+
+
+
+```{r}
+unique(p$data$DiseaseStatus)
+```
+
+
+# done
+# 3a All E.coli samples vs matched control samples
+```{r}
+
+
+# Recode DiseaseStatus: Control on the left, E.coli on the right
+p$data$DiseaseStatus <- factor(
+  p$data$Bloodculture_isolated_pathogen,
+  levels = c("Control", "Escherichia coli")  # or use 0/1 if coded numerically
+)
+# Bloodculture_isolated_pathogen!= "Escherichia coli"
+# Filter data for E.coli and Control only
+
+
+ecoli_data <- p$data %>%
+  filter(Bloodculture_isolated_pathogen %in% c("Control", "Escherichia coli")) %>%
+  mutate(
+    DiseaseStatus = recode(Bloodculture_isolated_pathogen,
+                           "Control" = "Control",
+                           "Escherichia coli" = "E.coli"),
+    DiseaseStatus = factor(DiseaseStatus, levels = c("Control", "E.coli"))
+   
+  )
+
+
+# Observed Richness
+subp1 <- ggplot(ecoli_data[ecoli_data$variable == "Observed", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+  theme_bw() +
+  ylab("Observed Richness") +
+  xlab("") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+
+# Shannon Index
+subp2 <- ggplot(ecoli_data[ecoli_data$variable == "Shannon", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+  theme_bw() +
+  ylab("Shannon Index") +
+  xlab("") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+
+# Chao1
+subp3 <- ggplot(ecoli_data[ecoli_data$variable == "Chao1", ],
+                aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(size = 2, width = 0.2) +
+  theme_bw() +
+  ylab("Chao1") +
+  xlab("") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+
+# Combine plots
+plot_grid(subp1, subp2, subp3, ncol = 3, labels = c("A", "B", "C"))
+
+# Save figure
+ggsave(path = "figs", filename ="3aalpha_Ecoli_vs_Control.png", height = 5, width = 12)
+
+
+
+
+```
+# done
+```{r}
+# p value
+library(dplyr)
+
+# Calculate p-values for each diversity metric
+pval_df <- ecoli_data %>%
+  group_by(variable) %>%
+  summarise(
+    p_value = tryCatch(
+      wilcox.test(value ~ DiseaseStatus)$p.value,
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  )
+
+# Save to CSV
+write.csv(pval_df, "3a_Ecoli_vs_Control_pvalues.csv", row.names = FALSE)
+
+# View in console
+print(pval_df)
+```
+
+
+
+# 3.b	All E.coli samples vs matched control samples
+# Separated based on time periods
+
+```{r}
+
+
+# Filter for Control vs E. coli 
+ecoli_data <- p$data %>%
+  filter(Bloodculture_isolated_pathogen %in% c("Control", "Escherichia coli")) %>%
+  mutate(
+    DiseaseStatus = recode(Bloodculture_isolated_pathogen,
+                           "Control" = "Control",
+                           "Escherichia coli" = "E.coli"),
+    DiseaseStatus = factor(DiseaseStatus, levels = c("Control", "E.coli")),
+    Timeperiods = factor(Timeperiods, levels = c("D", "C", "B", "A"))
+  )
+
+
+# Base theme
+base_theme <- theme_bw() +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    legend.title = element_blank()  # Remove "fill = DiseaseStatus" title
+  )
+
+# Plotting function
+plot_index <- function(data, index_name, y_label) {
+  ggplot(data %>% filter(variable == index_name),
+         aes(x = Timeperiods, y = value, fill = DiseaseStatus)) +
+    geom_boxplot(alpha = 0.3, position = position_dodge(0.8)) +
+    geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+                alpha = 0.6, size = 1.5) +
+    xlab("Time Period") + ylab(y_label) +
+    scale_fill_brewer(palette = "Dark2") +
+    base_theme
+}
+
+# Generate plots
+plot_observed <- plot_index(ecoli_data, "Observed", "Observed Richness")
+plot_shannon  <- plot_index(ecoli_data, "Shannon",  "Shannon Index")
+plot_chao1    <- plot_index(ecoli_data, "Chao1",    "Chao1 Index")
+
+#  save each plot
+ggsave(path = "figs", filename ="3bObserved_Ecoli_vs_Control_by_time.png", plot_observed, width = 10, height = 5)
+ggsave(path = "figs", filename ="3bShannon_Ecoli_vs_Control_by_time.png", plot_shannon, width = 10, height = 5)
+ggsave(path = "figs", filename ="3bChao1_Ecoli_vs_Control_by_time.png", plot_chao1, width = 10, height = 5)
+
+# Display all 3 plots
+print(plot_observed)
+print(plot_shannon)
+print(plot_chao1)
+
+
+
+
+
+
+```
+```{r}
+library(dplyr)
+
+# Compute p-values per Timeperiods and variable
+pvalues_ecoli <- ecoli_data %>%
+  group_by(Timeperiods, variable) %>%
+  summarise(
+    p_value = wilcox.test(value ~ DiseaseStatus)$p.value,
+    .groups = "drop"
+  )
+
+print(pvalues_ecoli)
+
+# Optional: Save results to CSV
+write.csv(pvalues_ecoli, "3b_ecoli_pvalues.csv", row.names = FALSE)
+
+```
+
+#####  end
+
+
+
+# done Q4
+#Beta Diversity Comparison:
+
+##PCoA plots: Timeperiods added as a covariate 
+Normalize the data first:
+```{r}
+phy.red <- readRDS("phyloseq_disc_red.rds") # need to change
+#p <- plot_richness(phy.red, "Timeperiods", "DiseaseCausative",
+                  # measures = c("Observed", "Shannon", "Chao1"))
+#normalize data:
+phy.norm  = transform_sample_counts(phy.red, function(x) x / sum(x) )
+
+#add metadata information to use in the plot:
+#meta_data <- read_csv("metadata.csv")
+#extract discovery dataset rows:
+meta_data <- read_excel("..//20250611_Overview samples for Animesh.xlsx", sheet = "Metadata")  # Metadata
+#extract the rows for the discovery dataset:
+#meta_data <- meta_data[c(1:220),]  # need to change
+meta_data <- meta_data[meta_data$Cohort == "Validatie cohort 1", ]
+#rename columns:
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[8] <- "MatchGroup"
+colnames(meta_data)[9] <- "DiseaseStatus"
+colnames(meta_data)[10] <- "DiseaseCausative"  # need to change the name Subgroup
+#reformat some of the inputs:
+meta_data$DiseaseStatus <- ifelse(meta_data$DiseaseStatus == 1, "Disease", "Control")
+#meta_data$Bloodculture_isolated_pathogen[meta_data$Bloodculture_isolated_pathogen == -99] <- "None" 
+# Causative_pathogen
+#meta_data$MatchGroup <- as.character(meta_data$MatchGroup)
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 1 ] <- "S. aureus LOS"
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 2 ] <- "Gut-derived LOS"
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 0 ] <- "Control"
+
+#make this metadata the sample table for the normalized data set:
+sd = sample_data(data.frame(
+ meta_data, row.names=sample_names(phy), stringsAsFactors=FALSE))
+
+sample_data(phy.norm)=sd
+```
+# test
+
+```{r}
+ord_norm=ordinate(phy.norm, "PCoA", "bray")
+
+# Disease status only (no shape by Timeperiods)
+or1 <- plot_ordination(phy.norm, ord_norm, color = "DiseaseStatus") +
+  geom_point(size = 4) +
+  scale_color_brewer(palette = "Dark2") +  # Use color instead of fill
+  theme_bw()
+print(or1)
+ggsave(path = "figs", filename = "4aa1PCoA_disc.png", height = 7, width = 15)
+
+```
+
+
+
+# need changes
+Make plot:
+```{r}
+#create PCoA with brays curtis distances:
+ord_norm=ordinate(phy.norm, "PCoA", "bray")
+
+#disease status and timeperiod:
+or1=plot_ordination(phy.norm, ord_norm, color="DiseaseStatus")+ # ,shape="Timeperiods"
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#match group:
+or2=plot_ordination(phy.norm, ord_norm, color=as.character("MatchGroup"))+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#patient id:
+or3=plot_ordination(phy.norm, ord_norm, color="Patient.ID")+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+print(or3)
+#plot_grid(or1,or2,or3, ncol = 3)       #combine into one plot:
+
+ggsave(path = "figs", filename = "4aPCoA_disc.png", height = 7, width = 15)
+```
+```{r}
+#time periods and type of LOS disease:
+or22=plot_ordination(phy.norm, ord_norm, shape = "Timeperiods", color=as.character("DiseaseCausative"))+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#causative pathogen of disease:
+or33=plot_ordination(phy.norm, ord_norm, color="Bloodculture_isolated_pathogen")+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#combine into one plot:
+#plot_grid(or22,or33, ncol = 3)
+print(or33)
+ggsave(path = "figs", filename = "4bPCoA_disc_sec.png", height = 7, width = 15)
+```
+
+## new for metrics, input features, R2, F-value and P-value
+
+```{r}
+library(phyloseq)
+library(vegan)
+library(dplyr)
+
+# Safe PERMANOVA function
+get_permanova_stats <- function(physeq, variable) {
+  metadata <- as(sample_data(physeq), "data.frame")
+  
+  # Skip if variable not found or <2 unique values
+  if (!(variable %in% colnames(metadata))) return(NULL)
+  if (length(unique(na.omit(metadata[[variable]]))) < 2) return(NULL)
+  
+  # Build formula dynamically
+  fmla <- as.formula(paste("distance(physeq, method = 'bray') ~", variable))
+  
+  # Run PERMANOVA
+  ad <- adonis2(fmla, data = metadata)
+  
+  # Check if valid results
+  if (nrow(ad) < 1) return(NULL)
+  
+  df <- as.data.frame(ad)[1, , drop = FALSE]
+  
+  return(data.frame(
+    Feature = variable,
+    R2 = df$R2,
+    F_value = df$F,
+    P_value = df$`Pr(>F)`,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Variables to test
+vars_to_test <- c("DiseaseStatus", "DiseaseCausative", "Bloodculture_isolated_pathogen", "Timeperiods",  "Patient.ID")
+
+# Run tests
+permanova_results <- bind_rows(lapply(vars_to_test, function(v) {
+  get_permanova_stats(phy.norm, v)
+}))
+
+# Save results
+write.csv(permanova_results, "4a_permanova_metrics.csv", row.names = FALSE)
+
+print(permanova_results)
+
+
+```
+# Subgroups (Gut-derived/S.aureus/Controls)
+
+```{r}
+library(phyloseq)
+library(ggplot2)
+
+# Assuming phy.norm and ord_norm are already created
+# Make PCoA plot colored by DiseaseCausative (subgroups)
+or_subgroups <- plot_ordination(phy.norm, ord_norm, color = "DiseaseCausative") +
+  geom_point(size = 4) +
+  scale_color_brewer(palette = "Set1") +  # Choose a palette for multiple groups
+  theme_bw() +
+  labs(color = "Subgroup")  # Rename legend title
+
+ggsave(path = "figs", filename = "4bPCoA_subgroup.png", height = 7, width = 15)
+print(or_subgroups)
+
+library(vegan)
+library(tidyverse)
+
+# Assuming `phy.norm` has sample_data with DiseaseCausative column
+# Calculate distance matrix (e.g., Bray-Curtis)
+dist_matrix <- phyloseq::distance(phy.norm, method = "bray")
+
+# Convert sample_data to data frame
+meta_df <- as(sample_data(phy.norm), "data.frame")
+
+# Run PERMANOVA for DiseaseCausative
+permanova_res <- adonis2(dist_matrix ~ DiseaseCausative, data = meta_df, permutations = 999)
+
+# Extract and tidy results
+permanova_table <- as.data.frame(permanova_res) %>%
+  tibble::rownames_to_column("Feature") %>%
+  filter(Feature != "Residual") %>%
+  transmute(
+    Feature = Feature,
+    R2 = `R2`,
+    F_value = `F`,
+    P_value = `Pr(>F)`
+  )
+
+print(permanova_table)
+
+
+```
+
+
+
+## new code
+```{r}
+library(vegan)
+library(dplyr)
+library(phyloseq)
+
+# Pairwise PERMANOVA function
+pairwise_permanova <- function(physeq, variable, method = "bray", permutations = 999) {
+  metadata <- as(sample_data(physeq), "data.frame")
+  
+  # Ensure variable exists and has at least 2 levels
+  if (!(variable %in% colnames(metadata))) return(NULL)
+  lvls <- unique(na.omit(metadata[[variable]]))
+  if (length(lvls) < 2) return(NULL)
+  
+  dist_mat <- distance(physeq, method = method)
+  
+  results <- data.frame()
+  
+  combs <- combn(lvls, 2, simplify = FALSE)
+  
+  for (cmb in combs) {
+    # Subset samples for the pair
+    keep_samples <- rownames(metadata)[metadata[[variable]] %in% cmb]
+    dist_sub <- as.dist(as.matrix(dist_mat)[keep_samples, keep_samples])
+    meta_sub <- metadata[keep_samples, , drop = FALSE]
+    
+    fmla <- as.formula(paste("dist_sub ~", variable))
+    ad <- adonis2(fmla, data = meta_sub, permutations = permutations)
+    df <- as.data.frame(ad)[1, , drop = FALSE]
+    
+    results <- rbind(results, data.frame(
+      Feature = paste(cmb, collapse = " vs "),
+      R2 = df$R2,
+      F_value = df$F,
+      P_value = df$`Pr(>F)`,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  return(results)
+}
+
+# Example: pairwise PERMANOVA for DiseaseCausative
+pairwise_results <- pairwise_permanova(phy.norm, "DiseaseCausative")
+
+print(pairwise_results)
+
+
+## end
+```
+
+##Pernanova Analysis:
+Variation in microbe composition explained by disease status and time period as well as their interactions:
+```{r}
+metadata <- as(sample_data(phy.norm), "data.frame")
+ad1=adonis2(distance(phy.norm, method="bray") ~ DiseaseStatus*Timeperiods,
+         data = metadata)
+ad1
+```
+Variation in microbe composition explained by match group:
+```{r}
+ad2=adonis2(distance(phy.norm, method="bray") ~ MatchGroup,
+         data = metadata)
+ad2
+```
+Variation in microbe composition explained by patient ID:
+```{r}
+ad3=adonis2(distance(phy.norm, method="bray") ~ Patient.ID,
+         data = metadata)
+ad3
+```
+Variation in microbe composition explained by LOS types, timeperiods and their interactions:
+```{r}
+ad4=adonis2(distance(phy.norm, method="bray") ~ DiseaseCausative*Timeperiods,
+         data = metadata)
+ad4
+```
+Variation in microbe composition explained by the causative pathogen:
+```{r}
+ad5=adonis2(distance(phy.norm, method="bray") ~ Causative_pathogen,
+         data = metadata)
+ad5
+```
+
+# new 5a done
+#  need to run 987 for phy.red <- readRDS("phyloseq_disc_red.rds")
+
+```{r}
+
+# Extract metadata
+df_input_metadata <- data.frame(sample_data(phy.red))
+df_input_metadata$Timeperiods = factor(df_input_metadata$Timeperiods,
+                                   levels = c("A", "B", "C", "D"))
+# 1. Recode inside phyloseq sample_data
+sample_data(phy.red)$DiseaseStatus <- as.character(sample_data(phy.red)$DiseaseStatus)
+sample_data(phy.red)$DiseaseStatus[sample_data(phy.red)$DiseaseStatus == "1"] <- "LOS"
+sample_data(phy.red)$DiseaseStatus[sample_data(phy.red)$DiseaseStatus == "0"] <- "Control"
+
+# 2. Convert to factor with Control first
+sample_data(phy.red)$DiseaseStatus <- factor(sample_data(phy.red)$DiseaseStatus,
+                                             levels = c("Control", "LOS"))
+
+# 3. Check if we have the right counts
+table(sample_data(phy.red)$DiseaseStatus)
+
+# 4. Now subset
+phy.los <- subset_samples(phy.red, DiseaseStatus %in% c("Control", "LOS"))
+
+
+
+```
+
+
+```{r}
+
+# Run Maaslin2: i) LOS vs Control
+fit_data <- Maaslin2(
+    input_data    = t(otu_table(phy.los)),
+    input_metadata = df_input_metadata,
+    output         = "Maaslin2_output_LOSvsControl",
+    fixed_effects  = c("DiseaseStatus", "Timeperiods"),  # must include Timeperiods 
+    random_effects = c("Patient.ID")
+)
+
+```
+
+# new 5q. 2nd runs
+
+# read from phyloseq_disc_red.rds
+```{r}
+# 1. Load your saved phyloseq object
+phy.red <- readRDS("phyloseq_disc_red.rds")
+# View the column names in the sample_data slot
+colnames(sample_data(phy.red))
+```
+
+```{r}
+# 1. Extract metadata
+df_input_metadata <- data.frame(sample_data(phy.red))
+df_input_metadata$Timeperiods = factor(df_input_metadata$Timeperiods,
+                                   levels = c("A", "B", "C", "D"))
+
+# 2. Recode DiseaseCausative
+sample_data(phy.red)$DiseaseCausative <- as.character(sample_data(phy.red)$DiseaseCausative)
+sample_data(phy.red)$DiseaseCausative[sample_data(phy.red)$DiseaseCausative == "0"] <- "Control"
+sample_data(phy.red)$DiseaseCausative[sample_data(phy.red)$DiseaseCausative == "1"] <- "S_aureus_LOS"
+sample_data(phy.red)$DiseaseCausative[sample_data(phy.red)$DiseaseCausative == "2"] <- "Gut_LOS"
+
+# 3. Convert to factor (Control first)
+sample_data(phy.red)$DiseaseCausative <- factor(sample_data(phy.red)$DiseaseCausative,
+                                                levels = c("Control", "Gut_LOS", "S_aureus_LOS"))
+
+# 4. Check recoding
+table(sample_data(phy.red)$DiseaseCausative)
+
+#----------------------------
+# i. Control vs Gut-derived LOS
+#----------------------------
+phy.cg <- subset_samples(phy.red, DiseaseCausative %in% c("Control", "Gut_LOS"))
+df_meta_cg <- data.frame(sample_data(phy.cg))
+fit_cg <- Maaslin2(
+  input_data    = t(otu_table(phy.cg)),
+  input_metadata = df_meta_cg,
+  output         = "Maaslin2_output_1ControlvsGut_LOS",
+  fixed_effects  = c("DiseaseCausative","Timeperiods"),  # must include Timeperiods 
+  random_effects = c("Patient.ID"),
+  reference      = c("Timeperiods,A", "DiseaseCausative,Control")  # also explicit for clarity  # set "A" as reference
+)
+
+```
+
+
+```{r}
+
+#----------------------------
+# ii. S. aureus LOS vs Control
+#----------------------------
+phy.sc <- subset_samples(phy.red, DiseaseCausative %in% c("Control", "S_aureus_LOS"))
+df_meta_sc <- data.frame(sample_data(phy.sc))
+fit_sc <- Maaslin2(
+  input_data    = t(otu_table(phy.sc)),
+  input_metadata = df_meta_sc,
+  output         = "Maaslin2_output_2S.aureusvsControl",
+  fixed_effects  = c("DiseaseCausative", "Timeperiods"),
+  random_effects = c("Patient.ID"),
+  reference      = c("Timeperiods,A", "DiseaseCausative,Control")
+)
+
+print("-------------new run iii---------------")
+```
+
+# new run for iii
+```{r}
+# iii. S. aureus LOS vs Gut-derived LOS  # must include Timeperiods 
+#---------------------------- only Gut_LOS and S_aureus_LOS (no Controls).
+phy.sg <- subset_samples(phy.red, DiseaseCausative %in% c("Gut_LOS", "S_aureus_LOS"))
+df_meta_sg <- data.frame(sample_data(phy.sg))
+fit_sg <- Maaslin2(
+  input_data    = t(otu_table(phy.sg)),
+  input_metadata = df_meta_sg,
+  output         = "Maaslin2_output_3S.aureusvsGut_LOS",
+  fixed_effects  = c("DiseaseCausative", "Timeperiods"),  
+  random_effects = c("Patient.ID"),
+  reference      = c("Timeperiods,A", "DiseaseCausative,Gut_LOS") # Since "Control" doesn’t exist in the subset
+)
+
+```
+
+
+# end 2nd runs
+
+
+
+# 3.	E. coli LOS vs controls 
+
+Compare each type to the control group:
+```{r}
+#  E. coli vs Control comparison:
+df_input_metadata=data.frame(sample_data(phy.red))
+df_input_metadata$Timeperiods = factor(df_input_metadata$Timeperiods,
+                                   levels = c("A", "B", "C", "D"))
+
+
+# Subset phyloseq object to only E.coli and Control samples
+phy.red_EC_N <- subset_samples(phy.red, Bloodculture_isolated_pathogen %in% c("Escherichia coli", "Control"))
+
+# Filter metadata to only those samples present in subset phyloseq object
+df_meta_EC_N <- df_input_metadata[rownames(df_input_metadata) %in% sample_names(phy.red_EC_N), ]
+
+# Optionally, make sure Bloodculture_isolated_pathogen is a factor with correct levels for MaAsLin2
+df_meta_EC_N$Bloodculture_isolated_pathogen <- factor(df_meta_EC_N$Bloodculture_isolated_pathogen,
+                                                     levels = c("Control", "Escherichia coli"))
+out_dir <- "Maaslin2_causative_pathogen_5.3.EcolivsControl"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+# Run MaAsLin2: E.coli vs Control, adjusting for Timeperiods if you want
+fit_data <- Maaslin2(
+  input_data = t(otu_table(phy.red_EC_N)),
+  input_metadata = df_meta_EC_N,
+  output = out_dir,
+  #fixed_effects = "Bloodculture_isolated_pathogen",  # need to runs next line only
+  fixed_effects = c("Bloodculture_isolated_pathogen", "Timeperiods"),  # must include Timeperiods 
+  random_effects = c("Patient.ID")
+)
+
+
+```
+
+
+# end 3rd runs
+
+
+
+
+
+# extra runs
+# By disease status:
+```{r}
+#obtain metadata as a dataframe:
+df_input_metadata=data.frame(sample_data(phy.red))
+df_input_metadata$Timeperiods = factor(df_input_metadata$Timeperiods,
+                                   levels = c("A", "B", "C", "D"))
+#compare by disease status:
+fit_data = Maaslin2(
+  input_data = t(otu_table(phy.red)), 
+  input_metadata = df_input_metadata, 
+  output = paste0("Maaslin2_output_Dis_stat_"), 
+  fixed_effects = c("DiseaseStatus", "Timeperiods"),
+  random_effects = c("Patient.ID"))
+```
+
+## no need
+
+Extract taxonomy file of the reduced features and samples:
+```{r}
+tax_df <- as.data.frame(tax_table(phy.red))
+write.csv(tax_df, file = "taxa_red.csv", row.names = TRUE)
+```
+

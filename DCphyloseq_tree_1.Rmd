@@ -1,0 +1,177 @@
+---
+title: "sepsis_script for phyloseq_disc "
+output: html_document
+date: "18.05.2025"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("phyloseq")
+
+if(!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("Maaslin2")
+
+install.packages("Matrix")
+install.packages("pgirmess")
+install.packages("agricolae")
+install.packages("readxl")  # read from xlsx file
+
+```
+
+You may have to install further packages dependent on your version of R.
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(data.table)
+library(cowplot)
+library(Maaslin2)
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+```
+
+#How to make phyloseq object:
+
+Reformat table:
+
+
+```{r}
+disc <- read_excel("../20250512_OTU tables_percohort_sepsis prediction model.xlsx", sheet = "DC")
+disc_otus_t <- t(disc)
+# Convert to dataframe
+disc_otus <- as.data.frame(disc_otus_t, stringsAsFactors = FALSE)
+# Make the first row the column names and then remove it
+colnames(disc_otus) <- disc_otus[1, ]
+disc_otus <- disc_otus[-1, ]
+# Optional: make rownames from a column if needed
+# rownames(disc_otus) <- disc_otus[[1]]
+# disc_otus <- disc_otus[, -1]
+
+# Create vector of column names to remove
+remove_col <- paste0("DC-PC", 1:13)
+# Remove the columns as its not match DC with meta data
+disc_otus <- disc_otus[, !(names(disc_otus) %in% remove_col)]
+
+##### can delete
+dim(disc_otus)   # gives rows and columns
+nrow(disc_otus)  # number of ASVs (e.g., ASV1, ASV2, …)
+ncol(disc_otus)  # number of OTUs (samples/features)
+
+####
+
+# Write to CSV
+write.csv(disc_otus, "disc_otusDC.csv", row.names = TRUE)
+# change file name
+tax <- read_excel("../20250611_Overview samples for Animesh.xlsx", sheet = "Tax table selection overlapping")
+# Save as CSV
+write.csv(tax, "overlaptax_table.csv", row.names = FALSE)
+
+tax <- read_excel("../20250512_OTU tables_percohort_sepsis prediction model.xlsx", sheet = "OTU table all")
+# Save as CSV
+write.csv(tax, "alltax_table.csv", row.names = FALSE)
+
+```
+
+#Create and alter the OTU table:
+
+```{r}
+disc_otus <- read_csv("disc_otusDC.csv")
+disc_otus <- as.data.frame(disc_otus)
+#Make the first column the rownames and then remove it:
+rownames(disc_otus) <- disc_otus[,1]
+disc_otus <- disc_otus[,-1]
+
+#only the rows of taxonomy in disc:
+#taxonomy <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx", sheet = "OTU table all")
+taxonomy <- read_csv("alltax_table.csv")
+dim(taxonomy)
+taxonomy <- as.data.frame(taxonomy)
+#Make the first column the rownames and then remove it:
+rownames(taxonomy) <- taxonomy[,1]
+taxonomy <- taxonomy[,-1]
+#extract only the taxa present in this dataset:
+v <- intersect(rownames(disc_otus), rownames(taxonomy))
+taxonomy <- taxonomy[v,]
+
+```
+Create matrixes of otu and taxonomy table:
+```{r}
+#otu:
+original_ids <- rownames(disc_otus)
+otumat <- as.matrix(disc_otus)
+rownames(otumat) <- paste0("OTU", 1:nrow(otumat))
+colnames(otumat) <- paste0("Sample", 1:ncol(otumat))
+
+# Create a mapping data frame
+otu_mapping <- data.frame(
+  OTU = rownames(otumat),
+  Original_ID = original_ids
+)
+
+# Save to file
+write.csv(otu_mapping, "otu_id_mapping.csv", row.names = FALSE)
+
+# just for take result remove 9 item
+#otumat <- otumat[, 1:(ncol(otumat) - 9)] # must delete this line
+
+#taxonomy:
+taxonomy <- taxonomy[,-c(8)]
+taxmat <- as.matrix(taxonomy)
+#rename rows:
+rownames(taxmat) <- rownames(otumat)
+colnames(taxmat) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+```
+
+Create phyloseq object:
+```{r}
+OTU = otu_table(otumat, taxa_are_rows = TRUE)
+TAX = tax_table(taxmat)
+physeq = phyloseq(OTU, TAX)
+```
+
+Add metadata table:
+```{r}
+meta_data <- read_excel("../20250611_Overview samples for Animesh.xlsx", sheet = "Metadata")  # Metadata
+#extract the rows for the discovery dataset:
+#meta_data <- meta_data[c(1:220),]  # 220 need to change the code
+meta_data <- meta_data[meta_data$Cohort == "Discovery cohort", ]
+
+#rename some columns:
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[9] <- "DiseaseStatus"   # need to change name
+colnames(meta_data)[10] <- "DiseaseCausative" # no need this line  # Subgroup
+
+nrow(meta_data)
+length(sample_names(physeq))
+
+
+sampledata = sample_data(data.frame(
+ meta_data, row.names=sample_names(physeq), stringsAsFactors=FALSE))
+
+#add to phyloseq:
+physeq1 = merge_phyloseq(physeq, sampledata)
+physeq1
+
+```
+
+Save object:
+```{r}
+saveRDS(physeq1, 'phyloseq_disc.rds')
+```
+
+
+

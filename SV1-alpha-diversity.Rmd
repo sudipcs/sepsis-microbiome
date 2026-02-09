@@ -1,0 +1,751 @@
+---
+title: "disc_selection"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2026-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("phyloseq")
+# 
+# if(!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("Maaslin2")
+# 
+# install.packages("Matrix")
+# install.packages("pgirmess")
+# install.packages("agricolae")
+# install.packages("ggpubr")
+# install.packages("gt")
+# install.packages("FSA")
+```
+
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(ggpubr)
+library(data.table)
+library(cowplot)
+
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(FSA)
+library(lme4)
+library(lmerTest)   # for p-values in lmer
+library(emmeans)
+library(writexl)
+#library(Maaslin2)
+
+```
+
+Obtain phyloseq object:
+```{r}
+# Read saved phyloseq object
+phy.red <- readRDS("SV1phyloseq_disc_red.rds")
+phy.red
+
+```
+
+
+
+#Alpha Diversity Estimates: old
+
+```{r}
+# Generate alpha diversity data
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseStatus",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# Recode DiseaseStatus
+p$data$DiseaseStatus <- factor(
+  p$data$DiseaseStatus,
+  levels = c(0, 1),
+  labels = c("Control", "Sepsis")
+)
+
+
+# Generate alpha diversity data
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseStatus",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# Recode DiseaseStatus
+p$data$DiseaseStatus <- factor(
+  p$data$DiseaseStatus,
+  levels = c(0, 1),
+  labels = c("Control", "Sepsis")
+)
+
+subp1 <- ggplot(
+  p$data[p$data$variable == "Observed", ],
+  aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)
+) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2) +
+  theme_bw() +
+  ylab("Observed Richness") +
+  xlab("") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+
+subp2 <- ggplot(
+  p$data[p$data$variable == "Shannon", ],
+  aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)
+) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2) +
+  theme_bw() +
+  ylab("Shannon Index") +
+  xlab("Disease State (all samples)") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+subp3 <- ggplot(
+  p$data[p$data$variable == "Chao1", ],
+  aes(x = DiseaseStatus, y = value, fill = DiseaseStatus)
+) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2) +
+  theme_bw() +
+  ylab("Chao1") +
+  xlab("") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+
+alpha_plot <- plot_grid(
+  subp1, subp2, subp3,
+  ncol = 3,
+  labels = c("A", "B", "C")
+)
+
+alpha_plot
+```
+
+
+```{r}
+sample_variables(phy.red)
+
+```
+
+
+##Alpha diversity by timepoint: new
+
+# "Control - Sepsis"
+
+```{r}
+# ===============================
+# 0. Load libraries
+# ===============================
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(writexl)
+
+
+
+# ===============================
+# 2. Alpha diversity calculation
+# ===============================
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseStatus",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# Recode disease status
+p$data$DiseaseStatus <- factor(
+  p$data$DiseaseStatus,
+  levels = c(0, 1),
+  labels = c("Control", "Sepsis")
+)
+
+# ===============================
+# 3. Prepare dataframe for LMM
+# ===============================
+alpha_df <- p$data %>%
+  mutate(
+    SubjectID     = factor(Patient.ID),
+    Timeperiods   = factor(Timeperiods),
+    DiseaseStatus = factor(DiseaseStatus, levels = c("Control", "Sepsis"))
+  )
+
+# ===============================
+# 4. Fit linear mixed-effects models
+# ===============================
+models <- list(
+
+  Observed = lmer(
+    log(value) ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Observed")
+  ),
+
+  Shannon = lmer(
+    value ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Shannon")
+  ),
+
+  Chao1 = lmer(
+    log(value) ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Chao1")
+  )
+)
+
+# ===============================
+# 5. Extract Control vs Sepsis p-values (by time period)
+# ===============================
+lmm_results <- lapply(names(models), function(m) {
+
+  emm <- emmeans(models[[m]], ~ DiseaseStatus | Timeperiods)
+
+  ctr <- contrast(emm, method = "pairwise")
+
+  as.data.frame(ctr) %>%
+    filter(contrast == "Control - Sepsis") %>%
+    transmute(
+      Metric     = m,
+      Timeperiod = Timeperiods,
+      Estimate   = estimate,
+      SE         = SE,
+      df         = df,
+      t_value    = t.ratio,
+      P_value    = p.value
+    )
+}) %>% bind_rows()
+
+# ===============================
+# 6. Add sample sizes
+# ===============================
+n_counts <- alpha_df %>%
+  group_by(variable, Timeperiods, DiseaseStatus) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = DiseaseStatus,
+    values_from = N,
+    names_prefix = "N_"
+  )
+
+lmm_results <- lmm_results %>%
+  left_join(
+    n_counts,
+    by = c("Metric" = "variable", "Timeperiod" = "Timeperiods")
+  )
+
+# ===============================
+# 7. Save to Excel (.xlsx)
+# ===============================
+write_xlsx(
+  lmm_results,
+  "savefiles/SV1_ControlsvsSepsis_Alpha_diversity_LMM_by_timeperiod.xlsx"
+)
+
+print("Done & Saved !")
+
+```
+
+
+## Controls vs S. aureus LOS
+
+```{r}
+
+# ===============================
+# 2️⃣ Compute alpha diversity
+# ===============================
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseCausative",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# ===============================
+# 3️⃣ Recode DiseaseCausative
+# ===============================
+p$data$DiseaseCausative[p$data$DiseaseCausative == 1] <- "S. aureus LOS"
+p$data$DiseaseCausative[p$data$DiseaseCausative == 2] <- "Gut-derived LOS"
+p$data$DiseaseCausative[p$data$DiseaseCausative == 0] <- "Control"
+
+p$data$DiseaseCausative <- factor(
+  p$data$DiseaseCausative,
+  levels = c("Control", "Gut-derived LOS", "S. aureus LOS"),
+  labels = c("Control", "Gut-derived LOS", "S. aureus LOS")
+)
+
+# ===============================
+# 4️⃣ Filter for Controls vs S. aureus LOS
+# ===============================
+alpha_df <- p$data %>%
+  filter(DiseaseCausative %in% c("Control", "S. aureus LOS")) %>%
+  mutate(
+    SubjectID = factor(Patient.ID),
+    Timeperiods = factor(Timeperiods),
+    DiseaseCausative = factor(
+      DiseaseCausative,
+      levels = c("Control", "S. aureus LOS")
+    )
+  )
+
+# ===============================
+# 5️⃣ Fit linear mixed-effects models
+# ===============================
+models <- list(
+
+  Observed = lmer(
+    log(value) ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Observed")
+  ),
+
+  Shannon = lmer(
+    value ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Shannon")
+  ),
+
+  Chao1 = lmer(
+    log(value) ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+    data = alpha_df %>% filter(variable == "Chao1")
+  )
+)
+
+# ===============================
+# 6️⃣ Extract Control vs S. aureus LOS p-values
+# ===============================
+lmm_results <- lapply(names(models), function(m) {
+
+  emm <- emmeans(models[[m]], ~ DiseaseCausative | Timeperiods)
+
+  ctr <- contrast(emm, method = "pairwise")
+
+  as.data.frame(ctr) %>%
+    filter(contrast == "Control - S. aureus LOS") %>%
+    transmute(
+      Metric     = m,
+      Timeperiod = Timeperiods,
+      Estimate   = estimate,
+      SE         = SE,
+      df         = df,
+      t_value    = t.ratio,
+      P_value    = p.value
+    )
+}) %>% bind_rows()
+
+# ===============================
+# 7️⃣ Add sample sizes
+# ===============================
+n_counts <- alpha_df %>%
+  group_by(variable, Timeperiods, DiseaseCausative) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = DiseaseCausative,
+    values_from = N,
+    names_prefix = "N_"
+  )
+
+lmm_results <- lmm_results %>%
+  left_join(
+    n_counts,
+    by = c("Metric" = "variable", "Timeperiod" = "Timeperiods")
+  )
+
+# ===============================
+# 8️⃣ Save results to Excel
+# ===============================
+write_xlsx(
+  lmm_results,
+  "savefiles/SV1_Control_vs_SAureus_Alpha_diversity_LMM_by_timeperiod.xlsx"
+)
+
+# ===============================
+# ✅ Done! The Excel file contains:
+# Metric | Timeperiod | Estimate | SE | df | t_value | P_value | N_Control | N_S. aureus LOS
+# ===============================
+
+
+
+print("Done & Saved !")
+
+```
+
+
+#### Control vs E. coli
+
+```{r}
+
+
+# ===============================
+# 2️⃣ Compute alpha diversity
+# ===============================
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "Bloodculture_isolated_pathogen",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# ===============================
+# 3️⃣ Recode for Control vs E.coli
+# ===============================
+alpha_df <- p$data %>%
+  filter(Bloodculture_isolated_pathogen %in% c("Control", "Escherichia coli")) %>%
+  mutate(
+    DiseaseStatus = recode(Bloodculture_isolated_pathogen,
+                           "Control" = "Control",
+                           "Escherichia coli" = "E.coli"),
+    DiseaseStatus = factor(DiseaseStatus, levels = c("Control", "E.coli")),
+    SubjectID = factor(Patient.ID),
+    Timeperiods = factor(Timeperiods)
+  )
+
+# Quick check
+table(alpha_df$DiseaseStatus, alpha_df$Timeperiods)
+alpha_df$Timeperiods <- droplevels(alpha_df$Timeperiods)
+
+# ===============================
+# 4️⃣ Fit linear-mixed effects models (true LMM)
+# ===============================
+lmm_models <- list(
+  Observed = lmer(log(value + 1) ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Observed")),
+  Shannon  = lmer(value ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Shannon")),
+  Chao1   = lmer(log(value + 1) ~ DiseaseStatus * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Chao1"))
+)
+
+# ===============================
+# 5️⃣ Extract Control vs E.coli contrasts
+# ===============================
+lmm_results <- lapply(names(lmm_models), function(m) {
+  
+  emm <- emmeans(lmm_models[[m]], ~ DiseaseStatus | Timeperiods)
+  ctr <- contrast(emm, method = "pairwise")
+  ctr_df <- as.data.frame(ctr)
+  
+  # Ensure estimate is Control minus E.coli
+  ctr_df <- ctr_df %>%
+    filter(contrast %in% c("Control - E.coli", "E.coli - Control")) %>%
+    mutate(
+      Estimate = ifelse(contrast == "Control - E.coli", estimate, -estimate),
+      t_value  = ifelse(contrast == "Control - E.coli", t.ratio, -t.ratio),
+      P_value  = p.value
+    ) %>%
+    transmute(
+      Metric     = m,
+      Timeperiod = Timeperiods,
+      Estimate   = Estimate,
+      SE         = SE,
+      df         = df,
+      t_value    = t_value,
+      P_value    = P_value
+    )
+  
+  return(ctr_df)
+  
+}) %>% bind_rows()
+
+# ===============================
+# 6️⃣ Add sample sizes
+# ===============================
+n_counts <- alpha_df %>%
+  group_by(variable, Timeperiods, DiseaseStatus) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = DiseaseStatus,
+    values_from = N,
+    names_prefix = "N_"
+  )
+
+lmm_results <- lmm_results %>%
+  left_join(
+    n_counts,
+    by = c("Metric" = "variable", "Timeperiod" = "Timeperiods")
+  )
+
+# ===============================
+# 7️⃣ Save results to Excel
+# ===============================
+write_xlsx(
+  lmm_results,
+  "savefiles/SV1_Control_vs_Ecoli_Alpha_diversity_LMM_by_timeperiod.xlsx"
+)
+
+print("✅ Done! LMM results saved to Excel.")
+
+
+```
+
+# true linear-mixed effects model (LMM)###  Control vs Gut-derived LOS analysis,
+```{r}
+
+# ===============================
+# 2️⃣ Compute alpha diversity
+# ===============================
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseCausative",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# ===============================
+# 3️⃣ Recode for Control vs Gut-derived LOS
+# ===============================
+alpha_df <- p$data %>%
+  filter(DiseaseCausative %in% c(0, 2)) %>%  # 0=Control, 2=Gut-derived LOS
+  mutate(
+    DiseaseCausative = recode(DiseaseCausative,
+                              `0`="Control",
+                              `2`="Gut-derived LOS"),
+    DiseaseCausative = factor(DiseaseCausative, levels = c("Control", "Gut-derived LOS")),
+    SubjectID = factor(Patient.ID),
+    Timeperiods = factor(Timeperiods)
+  )
+
+# Quick check
+table(alpha_df$DiseaseCausative, alpha_df$Timeperiods)
+alpha_df$Timeperiods <- droplevels(alpha_df$Timeperiods)
+
+# ===============================
+# 4️⃣ Fit linear-mixed effects models (true LMM)
+# ===============================
+lmm_models <- list(
+  Observed = lmer(log(value + 1) ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Observed")),
+  Shannon  = lmer(value ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Shannon")),
+  Chao1   = lmer(log(value + 1) ~ DiseaseCausative * Timeperiods + (1 | SubjectID),
+                  data = alpha_df %>% filter(variable=="Chao1"))
+)
+
+# ===============================
+# 5️⃣ Extract Control vs Gut-derived LOS contrasts
+# ===============================
+lmm_results <- lapply(names(lmm_models), function(m) {
+  
+  emm <- emmeans(lmm_models[[m]], ~ DiseaseCausative | Timeperiods)
+  ctr <- contrast(emm, method = "pairwise")
+  ctr_df <- as.data.frame(ctr)
+  
+  # Ensure estimate is Control minus Gut-derived LOS
+  ctr_df <- ctr_df %>%
+    mutate(
+      Estimate = ifelse(grepl("Control.*Gut-derived", contrast), estimate, -estimate),
+      t_value  = ifelse(grepl("Control.*Gut-derived", contrast), t.ratio, -t.ratio),
+      P_value  = p.value
+    ) %>%
+    transmute(
+      Metric     = m,
+      Timeperiod = Timeperiods,
+      Estimate   = Estimate,
+      SE         = SE,
+      df         = df,
+      t_value    = t_value,
+      P_value    = P_value
+    )
+  
+  return(ctr_df)
+  
+}) %>% bind_rows()
+
+# ===============================
+# 6️⃣ Add sample sizes
+# ===============================
+n_counts <- alpha_df %>%
+  group_by(variable, Timeperiods, DiseaseCausative) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = DiseaseCausative,
+    values_from = N,
+    names_prefix = "N_"
+  )
+
+lmm_results <- lmm_results %>%
+  left_join(
+    n_counts,
+    by = c("Metric" = "variable", "Timeperiod" = "Timeperiods")
+  )
+
+# ===============================
+# 7️⃣ Save results to Excel
+# ===============================
+write_xlsx(
+  lmm_results,
+  "savefiles/SV1_Control_vs_GutDerived_Alpha_diversity_LMM_by_timeperiod.xlsx"
+)
+
+print("✅ Done! LMM results saved to Excel.")
+
+
+```
+
+
+
+## for alpha-diversity comparing Controls vs. Gut-derived vs. S. aureus in a single analysis. 
+
+```{r}
+
+# =====================================================
+# Libraries
+# =====================================================
+library(phyloseq)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(writexl)
+library(tidyr)
+
+# =====================================================
+# Load phyloseq
+# =====================================================
+phy.red <- readRDS("SV1phyloseq_disc_red.rds")
+
+# =====================================================
+# Alpha diversity
+# =====================================================
+p <- plot_richness(
+  phy.red,
+  x = "Timeperiods",
+  color = "DiseaseCausative",
+  measures = c("Observed", "Shannon", "Chao1")
+)
+
+# =====================================================
+# Recode 3 groups
+# =====================================================
+alpha_df <- p$data %>%
+  filter(DiseaseCausative %in% c(0,1,2)) %>%
+  mutate(
+    DiseaseCausative = factor(
+      DiseaseCausative,
+      levels = c(0,2,1),
+      labels = c("Control","Gut-derived LOS","S. aureus LOS")
+    ),
+    SubjectID = factor(Patient.ID),
+    Timeperiods = factor(Timeperiods)
+  )
+
+alpha_df$Timeperiods <- droplevels(alpha_df$Timeperiods)
+
+# =====================================================
+# Fit TRUE LMM
+# =====================================================
+lmm_models <- list(
+  Observed = lmer(log(value + 1) ~ DiseaseCausative * Timeperiods + (1|SubjectID),
+                  data = alpha_df %>% filter(variable=="Observed")),
+  Shannon  = lmer(value ~ DiseaseCausative * Timeperiods + (1|SubjectID),
+                  data = alpha_df %>% filter(variable=="Shannon")),
+  Chao1    = lmer(log(value + 1) ~ DiseaseCausative * Timeperiods + (1|SubjectID),
+                  data = alpha_df %>% filter(variable=="Chao1"))
+)
+
+# =====================================================
+# Global LMM tests
+# =====================================================
+global_tests <- lapply(names(lmm_models), function(m){
+
+  a <- anova(lmm_models[[m]])
+
+  data.frame(
+    Metric = m,
+    Effect = rownames(a),
+    df = a$NumDF,
+    F_value = a$`F value`,
+    P_value = a$`Pr(>F)`
+  )
+
+}) %>% bind_rows()
+
+# =====================================================
+# Pairwise contrasts by timepoint
+# =====================================================
+pairwise_results <- lapply(names(lmm_models), function(m){
+
+  emm <- emmeans(lmm_models[[m]], ~ DiseaseCausative | Timeperiods)
+
+  contrast(emm, "pairwise", adjust="tukey") %>%
+    as.data.frame() %>%
+    rename(Timeperiod = Timeperiods) %>%
+    mutate(Metric = m)
+
+}) %>% bind_rows()
+
+# =====================================================
+# Sample sizes per group per timepoint
+# =====================================================
+n_counts <- alpha_df %>%
+  group_by(variable, Timeperiods, DiseaseCausative) %>%
+  summarise(N = n(), .groups="drop") %>%
+  pivot_wider(
+    names_from = DiseaseCausative,
+    values_from = N,
+    names_prefix = "N_"
+  ) %>%
+  rename(
+    Metric = variable,
+    Timeperiod = Timeperiods
+  )
+
+# =====================================================
+# Merge pairwise + N
+# =====================================================
+final_results <- pairwise_results %>%
+  left_join(n_counts, by = c("Metric","Timeperiod"))
+
+# =====================================================
+# Export Excel
+# =====================================================
+write_xlsx(
+  list(
+    Global_LMM = global_tests,
+    Pairwise_with_N = final_results
+  ),
+  "savefiles/SV1_Alpha_diversity_3group_LMM.xlsx"
+)
+
+print("3-group LMEM completed & exported")
+
+```
+
+
+```{r}
+
+
+```
+
+
+
+# editing above this
+
+
+

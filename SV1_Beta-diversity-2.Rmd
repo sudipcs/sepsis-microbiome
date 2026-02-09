@@ -1,0 +1,605 @@
+---
+title: "disc_selection"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2026-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("phyloseq")
+# 
+# if(!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("Maaslin2")
+# 
+# install.packages("Matrix")
+# install.packages("pgirmess")
+# install.packages("agricolae")
+# install.packages("ggpubr")
+# install.packages("gt")
+# install.packages("FSA")
+```
+
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(ggpubr)
+library(data.table)
+library(cowplot)
+
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(FSA)
+library(patchwork)
+#library(Maaslin2)
+```
+
+Obtain phyloseq object:
+```{r}
+phy=readRDS("phyloseq_disc.rds")
+#phy
+# Read saved phyloseq object
+phy.red <- readRDS("phyloseq_disc_red.rds")
+phy.red
+summary(sample_sums(phy.red))
+
+```
+# should run line 56
+#Beta Diversity Comparison:
+
+##PCoA plots: Timeperiods added as a covariate 
+Normalize the data first:
+```{r}
+
+#phy=readRDS("phyloseq_disc.rds")
+phy=readRDS("phyloseq_val_one.rds") # for SV1/2 only
+
+# phyloseq_disc_red.rds > Reduced phyloseq object after rarefaction and sparsity filtering (ready for downstream analysis)
+phy.red <- readRDS("SV1phyloseq_disc_red.rds") # need to change
+#phy.red <- readRDS("phyloseq_disc_red.rds")
+#normalize data:
+phy.norm  = transform_sample_counts(phy.red, function(x) x / sum(x) )
+
+#add metadata information to use in the plot:
+
+meta_data <- read_excel("..//20250611_Overview samples for Animesh.xlsx", sheet = "Metadata")  # Metadata
+
+
+### # need to change  -->   Validatie cohort 2/1/   Discovery cohort
+meta_data <- meta_data[meta_data$Cohort == "Validatie cohort 1", ]
+#rename columns:
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[8] <- "MatchGroup"
+colnames(meta_data)[9] <- "DiseaseStatus"
+colnames(meta_data)[10] <- "DiseaseCausative"  # need to change the name Subgroup
+#reformat some of the inputs:
+meta_data$DiseaseStatus <- ifelse(meta_data$DiseaseStatus == 1, "Disease", "Control")
+#meta_data$Bloodculture_isolated_pathogen[meta_data$Bloodculture_isolated_pathogen == -99] <- "None" 
+# Causative_pathogen
+#meta_data$MatchGroup <- as.character(meta_data$MatchGroup)
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 1 ] <- "S. aureus LOS"
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 2 ] <- "Gut-derived LOS"
+meta_data$DiseaseCausative[meta_data$DiseaseCausative == 0 ] <- "Control"
+
+#make this metadata the sample table for the normalized data set:
+sd = sample_data(data.frame(
+ meta_data, row.names=sample_names(phy), stringsAsFactors=FALSE))
+
+sample_data(phy.norm)=sd
+
+```
+
+
+## ok
+
+
+
+
+```{r}
+ord_norm=ordinate(phy.norm, "PCoA", "bray")
+
+# Disease status only (no shape by Timeperiods)
+or1 <- plot_ordination(phy.norm, ord_norm, color = "DiseaseStatus") +
+  geom_point(size = 4) +
+  scale_color_brewer(palette = "Dark2") +  # Use color instead of fill
+  theme_bw()
+print(or1)
+#ggsave(path = "figs", filename = "4aa1PCoA_disc.png", height = 7, width = 15)
+
+```
+
+
+
+# need changes
+Make plot:
+```{r}
+#create PCoA with brays curtis distances:
+ord_norm=ordinate(phy.norm, "PCoA", "bray")
+
+#disease status and timeperiod:
+or1=plot_ordination(phy.norm, ord_norm, color="DiseaseStatus")+ # ,shape="Timeperiods"
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#match group:
+or2=plot_ordination(phy.norm, ord_norm, color=as.character("MatchGroup"))+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#patient id:
+or3=plot_ordination(phy.norm, ord_norm, color="Patient.ID")+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+print(or3)
+#plot_grid(or1,or2,or3, ncol = 3)       #combine into one plot:
+# ggsave(path = "figs", filename = "4aPCoA_disc.png", height = 7, width = 15)
+```
+```{r}
+#time periods and type of LOS disease:
+or22=plot_ordination(phy.norm, ord_norm, shape = "Timeperiods", color=as.character("DiseaseCausative"))+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#causative pathogen of disease:
+or33=plot_ordination(phy.norm, ord_norm, color="Bloodculture_isolated_pathogen")+
+  geom_point(size=4)+
+  scale_fill_brewer(palette="Dark2")+
+  theme_bw()
+
+#combine into one plot:
+#plot_grid(or22,or33, ncol = 3)
+print(or33)
+#ggsave(path = "figs", filename = "4bPCoA_disc_sec.png", height = 7, width = 15)
+```
+
+## new for metrics, input features, R2, F-value and P-value
+
+```{r}
+library(phyloseq)
+library(vegan)
+library(dplyr)
+
+# Safe PERMANOVA function
+get_permanova_stats <- function(physeq, variable) {
+  metadata <- as(sample_data(physeq), "data.frame")
+  
+  # Skip if variable not found or <2 unique values
+  if (!(variable %in% colnames(metadata))) return(NULL)
+  if (length(unique(na.omit(metadata[[variable]]))) < 2) return(NULL)
+  
+  # Build formula dynamically
+  fmla <- as.formula(paste("distance(physeq, method = 'bray') ~", variable))
+  
+  # Run PERMANOVA
+  ad <- adonis2(fmla, data = metadata)
+  
+  # Check if valid results
+  if (nrow(ad) < 1) return(NULL)
+  
+  df <- as.data.frame(ad)[1, , drop = FALSE]
+  
+  return(data.frame(
+    Feature = variable,
+    R2 = df$R2,
+    F_value = df$F,
+    P_value = df$`Pr(>F)`,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Variables to test
+vars_to_test <- c("DiseaseStatus", "DiseaseCausative", "Bloodculture_isolated_pathogen", "Timeperiods",  "Patient.ID" )  # NEW)
+
+# Run tests
+permanova_results <- bind_rows(lapply(vars_to_test, function(v) {
+  get_permanova_stats(phy.norm, v)
+}))
+
+# Save results
+#write.csv(permanova_results, "permanova_metrics.csv", row.names = FALSE)
+
+print(permanova_results)
+
+
+```
+
+# need to run for new figs
+
+```{r}
+sample_data(phy.norm)$Timeperiods <- factor(
+  sample_data(phy.norm)$Timeperiods,
+  levels = c("D", "C", "B", "A")  # adjust if needed
+)
+
+
+run_time_subset <- function(physeq, day_min, day_max, label) {
+  
+  meta <- as(sample_data(physeq), "data.frame")
+  
+  keep <- meta$Day_for_sepsis >= day_min &
+          meta$Day_for_sepsis <= day_max
+  
+  phy_sub <- prune_samples(keep, physeq)
+  phy_sub <- prune_taxa(taxa_sums(phy_sub) > 0, phy_sub)
+  
+  if (nsamples(phy_sub) < 2) return(NULL)
+  
+  # ordination
+  ord <- ordinate(phy_sub, "PCoA", "bray")
+  
+  # PERMANOVA
+  ad <- adonis2(distance(phy_sub, method = "bray") ~ DiseaseStatus,
+                data = as(sample_data(phy_sub), "data.frame"))
+  
+  label_stats <- paste0(
+    "R²=", round(ad$R2[1], 3),
+    "\nP=", signif(ad$`Pr(>F)`[1], 2)
+  )
+  
+  p <- plot_ordination(phy_sub, ord, color = "DiseaseStatus") +
+    geom_point(size = 4) +
+    stat_ellipse() +
+    scale_color_brewer(palette = "Dark2") +
+    ggtitle(paste("Days", day_min, "to", day_max)) +
+    annotate("text", x = Inf, y = Inf,
+             label = label_stats,
+             hjust = 1.1, vjust = 1.5) +
+    theme_bw()
+  
+  stats <- data.frame(
+    Window = label,
+    Days = paste(day_min, day_max, sep = " to "),
+    R2 = ad$R2[1],
+    F_value = ad$F[1],
+    P_value = ad$`Pr(>F)`[1]
+  )
+  
+  return(list(plot = p, stats = stats))
+}
+
+## change for SV1 if not all points
+windows <- list(
+ # list(-10, -9, "D"),
+ # list(-8, -7, "C"),
+  list(-6, -4, "B"),
+  list(-3, -1, "A")
+)
+
+results <- lapply(windows, function(w)
+  run_time_subset(phy.norm, w[[1]], w[[2]], w[[3]])
+)
+
+results <- results[!sapply(results, is.null)]
+
+
+```
+
+
+
+
+
+```{r}
+
+
+
+plots <- lapply(results, `[[`, "plot")
+stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+
+wrap_plots(plots, nrow = 1)
+print(stats)
+
+
+```
+
+
+## for DiseaseStatus plot
+# this is worked
+
+```{r}
+combined <- wrap_plots(plots, nrow = 1, guides = "collect") &
+  theme(legend.position = "top")
+
+combined
+
+ggsave(
+  filename = "figs/DC_PCoA_time_windows.png",
+  plot = combined,
+  width = 14,
+  height = 4,
+  dpi = 300
+)
+
+```
+
+
+
+# PCOA plots for the subgroups as well (controls vs. S. Aureus vs. Gut-derived and 
+# test
+
+```{r}
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(cowplot)
+
+## ---------------------------
+## lock subgroup factor levels
+## ---------------------------
+sample_data(phy.norm)$DiseaseCausative <-
+  factor(sample_data(phy.norm)$DiseaseCausative,
+         levels = unique(sample_data(phy.norm)$DiseaseCausative))
+
+## shared subgroup color scale
+subgroup_colors <- scale_color_brewer(palette = "Set1", drop = FALSE)
+
+## ---------------------------
+## function
+## ---------------------------
+run_time_subset_subgroup <- function(physeq, day_min, day_max, label) {
+  
+  meta <- as(sample_data(physeq), "data.frame")
+  
+  keep <- meta$Day_for_sepsis >= day_min &
+          meta$Day_for_sepsis <= day_max
+  
+  phy_sub <- prune_samples(keep, physeq)
+  phy_sub <- prune_taxa(taxa_sums(phy_sub) > 0, phy_sub)
+  
+  if (nsamples(phy_sub) < 2) return(NULL)
+  
+  ord <- ordinate(phy_sub, "PCoA", "bray")
+  
+  ad <- adonis2(distance(phy_sub, method = "bray") ~ DiseaseCausative,
+                data = as(sample_data(phy_sub), "data.frame"))
+  
+  label_stats <- paste0(
+    "R²=", round(ad$R2[1], 3),
+    "\nP=", signif(ad$`Pr(>F)`[1], 2)
+  )
+  
+  p <- plot_ordination(phy_sub, ord,
+                       color = "DiseaseCausative") +
+    geom_point(size = 4) +
+    stat_ellipse() +
+    subgroup_colors +
+    ggtitle(paste("Days", day_min, "to", day_max)) +
+    annotate("text", x = Inf, y = Inf,
+             label = label_stats,
+             hjust = 1.1, vjust = 1.5) +
+    theme_bw()
+  
+  stats <- data.frame(
+    Window = label,
+    Days = paste(day_min, day_max, sep = " to "),
+    R2 = ad$R2[1],
+    F_value = ad$F[1],
+    P_value = ad$`Pr(>F)`[1]
+  )
+  
+  return(list(plot = p, stats = stats))
+}
+
+## ---------------------------
+## windows
+## ---------------------------
+windows <- list(
+ # list(-10, -9, "D"),
+ # list(-8, -7, "C"),
+  list(-6, -4, "B"),
+  list(-3, -1, "A")
+)
+
+results_subgroup <- lapply(windows, function(w)
+  run_time_subset_subgroup(phy.norm, w[[1]], w[[2]], w[[3]])
+)
+
+results_subgroup <- results_subgroup[!sapply(results_subgroup, is.null)]
+
+plots_subgroup <- lapply(results_subgroup, `[[`, "plot")
+
+## ---------------------------
+## extract ONE legend
+## ---------------------------
+legend_subgroup <- cowplot::get_legend(
+  plots_subgroup[[1]] + theme(legend.position = "right")
+)
+
+plots_subgroup <- lapply(plots_subgroup, function(p)
+  p + theme(legend.position = "none"))
+
+combined_subgroup <- wrap_plots(plots_subgroup, nrow = 1)
+
+final_subgroup <- cowplot::plot_grid(
+  combined_subgroup,
+  legend_subgroup,
+  ncol = 2,
+  rel_widths = c(4, 1)
+)
+
+## show
+final_subgroup
+
+## ---------------------------
+## save
+## ---------------------------
+ggsave(
+  "figs/SV1-PCoA_subgroup_time_windows.png",
+  final_subgroup,
+  width = 14,
+  height = 4,
+  dpi = 300
+)
+
+
+
+
+```
+
+# the blood culture isolated pathogens
+```{r}
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(cowplot)
+
+## ---------------------------
+## lock factor levels globally
+## ---------------------------
+sample_data(phy.norm)$Bloodculture_isolated_pathogen <-
+  factor(sample_data(phy.norm)$Bloodculture_isolated_pathogen,
+         levels = unique(sample_data(phy.norm)$Bloodculture_isolated_pathogen))
+
+## shared color scale
+pathogen_colors <- scale_color_brewer(palette = "Dark2", drop = FALSE)
+
+## ---------------------------
+## function
+## ---------------------------
+run_time_subset <- function(physeq, day_min, day_max, label) {
+  
+  meta <- as(sample_data(physeq), "data.frame")
+  
+  keep <- meta$Day_for_sepsis >= day_min &
+          meta$Day_for_sepsis <= day_max
+  
+  phy_sub <- prune_samples(keep, physeq)
+  phy_sub <- prune_taxa(taxa_sums(phy_sub) > 0, phy_sub)
+  
+  if (nsamples(phy_sub) < 2) return(NULL)
+  
+  ord <- ordinate(phy_sub, "PCoA", "bray")
+  
+  ad <- adonis2(distance(phy_sub, method = "bray") ~ Bloodculture_isolated_pathogen,
+                data = as(sample_data(phy_sub), "data.frame"))
+  
+  label_stats <- paste0(
+    "R²=", round(ad$R2[1], 3),
+    "\nP=", signif(ad$`Pr(>F)`[1], 2)
+  )
+  
+  p <- plot_ordination(phy_sub, ord,
+                       color = "Bloodculture_isolated_pathogen") +
+    geom_point(size = 4) +
+    stat_ellipse() +
+    pathogen_colors +
+    ggtitle(paste("Days", day_min, "to", day_max)) +
+    annotate("text", x = Inf, y = Inf,
+             label = label_stats,
+             hjust = 1.1, vjust = 1.5) +
+    theme_bw()
+  
+  stats <- data.frame(
+    Window = label,
+    Days = paste(day_min, day_max, sep = " to "),
+    R2 = ad$R2[1],
+    F_value = ad$F[1],
+    P_value = ad$`Pr(>F)`[1]
+  )
+  
+  return(list(plot = p, stats = stats))
+}
+
+## ---------------------------
+## run windows
+## ---------------------------
+windows <- list(
+ # list(-10, -9, "D"),
+ # list(-8, -7, "C"),
+  list(-6, -4, "B"),
+  list(-3, -1, "A")
+)
+
+results <- lapply(windows, function(w)
+  run_time_subset(phy.norm, w[[1]], w[[2]], w[[3]])
+)
+
+results <- results[!sapply(results, is.null)]
+
+plots <- lapply(results, `[[`, "plot")
+stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+
+## ---------------------------
+## extract ONE legend
+## ---------------------------
+legend <- cowplot::get_legend(
+  plots[[1]] + theme(legend.position = "right")
+)
+
+## remove legends from plots
+plots <- lapply(plots, function(p)
+  p + theme(legend.position = "none"))
+
+## combine plots
+combined_plots <- wrap_plots(plots, nrow = 1)
+
+## attach legend once
+final_plot <- cowplot::plot_grid(
+  combined_plots,
+  legend,
+  ncol = 2,
+  rel_widths = c(4, 1)
+)
+
+## show
+final_plot
+
+## ---------------------------
+## save
+## ---------------------------
+ggsave(
+  "figs/SV1_beta_Pathogen_PCoA_time_windows.png",
+  final_plot,
+  width = 14,
+  height = 4,
+  dpi = 300
+)
+
+
+
+```
+
+
+# tring 
+
+
+
+
+
+
+
+
+
+
+
+

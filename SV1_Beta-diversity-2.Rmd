@@ -308,10 +308,11 @@ results <- results[!sapply(results, is.null)]
 
 
 plots <- lapply(results, `[[`, "plot")
-stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+stats_disease <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
 
 wrap_plots(plots, nrow = 1)
-print(stats)
+print(stats_disease )
+#write_xlsx(stats_disease , "figs/SV1-PCoA_time_window_stats.xlsx")
 
 
 ```
@@ -422,6 +423,8 @@ results_subgroup <- lapply(windows, function(w)
 )
 
 results_subgroup <- results_subgroup[!sapply(results_subgroup, is.null)]
+## added
+stats_subgroup <- dplyr::bind_rows(lapply(results_subgroup, `[[`, "stats"))
 
 plots_subgroup <- lapply(results_subgroup, `[[`, "plot")
 
@@ -481,7 +484,22 @@ sample_data(phy.norm)$Bloodculture_isolated_pathogen <-
          levels = unique(sample_data(phy.norm)$Bloodculture_isolated_pathogen))
 
 ## shared color scale
-pathogen_colors <- scale_color_brewer(palette = "Dark2", drop = FALSE)
+#pathogen_colors <- scale_color_brewer(palette = "Dark2", drop = FALSE)
+## global pathogen levels
+## ---------------------------
+pathogen_levels <- levels(sample_data(phy.norm)$Bloodculture_isolated_pathogen)
+
+## create named palette
+pathogen_palette <- setNames(
+  scales::hue_pal(l = 60, c = 150)(length(pathogen_levels)),
+  pathogen_levels
+)
+
+## shared color scale (locked)
+pathogen_colors <- scale_color_manual(
+  values = pathogen_palette,
+  drop = FALSE
+)
 
 ## ---------------------------
 ## function
@@ -547,7 +565,7 @@ results <- lapply(windows, function(w)
 results <- results[!sapply(results, is.null)]
 
 plots <- lapply(results, `[[`, "plot")
-stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+stats_pathogen <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
 
 ## ---------------------------
 ## extract ONE legend
@@ -593,6 +611,19 @@ ggsave(
 # tring 
 
 
+## new set of metrics for the new PCoA plots 
+```{r}
+library(writexl)
+write_xlsx(
+  list(
+    DiseaseStatus = stats_disease,
+    Subgroups = stats_subgroup,
+    Pathogens = stats_pathogen
+  ),
+  "figs/SV1_PERMANOVA_all_results.xlsx"
+)
+
+```
 
 
 

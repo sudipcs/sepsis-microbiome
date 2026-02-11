@@ -308,11 +308,11 @@ results <- results[!sapply(results, is.null)]
 
 
 plots <- lapply(results, `[[`, "plot")
-stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+stats_disease  <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
 
 wrap_plots(plots, nrow = 1)
-print(stats)
-
+print(stats_disease )
+write_xlsx(stats_disease , "figs/SV2-PCoA_time_window_stats.xlsx")
 
 ```
 
@@ -423,6 +423,9 @@ results_subgroup <- lapply(windows, function(w)
 
 results_subgroup <- results_subgroup[!sapply(results_subgroup, is.null)]
 
+## added
+stats_subgroup <- dplyr::bind_rows(lapply(results_subgroup, `[[`, "stats"))
+
 plots_subgroup <- lapply(results_subgroup, `[[`, "plot")
 
 ## ---------------------------
@@ -481,7 +484,26 @@ sample_data(phy.norm)$Bloodculture_isolated_pathogen <-
          levels = unique(sample_data(phy.norm)$Bloodculture_isolated_pathogen))
 
 ## shared color scale
-pathogen_colors <- scale_color_brewer(palette = "Dark2", drop = FALSE)
+#pathogen_colors <- scale_color_brewer(palette = "Dark2", drop = FALSE)
+
+## ---------------------------
+## global pathogen levels
+## ---------------------------
+pathogen_levels <- levels(sample_data(phy.norm)$Bloodculture_isolated_pathogen)
+
+## create named palette
+pathogen_palette <- setNames(
+  scales::hue_pal(l = 60, c = 150)(length(pathogen_levels)),
+  pathogen_levels
+)
+
+## shared color scale (locked)
+pathogen_colors <- scale_color_manual(
+  values = pathogen_palette,
+  drop = FALSE
+)
+
+
 
 ## ---------------------------
 ## function
@@ -547,14 +569,23 @@ results <- lapply(windows, function(w)
 results <- results[!sapply(results, is.null)]
 
 plots <- lapply(results, `[[`, "plot")
-stats <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
+stats_pathogen  <- dplyr::bind_rows(lapply(results, `[[`, "stats"))
 
 ## ---------------------------
 ## extract ONE legend
 ## ---------------------------
-legend <- cowplot::get_legend(
-  plots[[1]] + theme(legend.position = "right")
-)
+## create legend from FULL dataset (not subsets)
+legend_plot <- plot_ordination(
+  phy.norm,
+  ordinate(phy.norm, "PCoA", "bray"),
+  color = "Bloodculture_isolated_pathogen"
+) +
+  geom_point() +
+  pathogen_colors +
+  theme_bw() +
+  theme(legend.position = "right")
+
+legend <- cowplot::get_legend(legend_plot)
 
 ## remove legends from plots
 plots <- lapply(plots, function(p)
@@ -592,9 +623,38 @@ ggsave(
 
 # tring 
 
+## new set of metrics for the new PCoA plots 
+```{r}
+library(writexl)
+write_xlsx(
+  list(
+    DiseaseStatus = stats_disease,
+    Subgroups = stats_subgroup,
+    Pathogens = stats_pathogen
+  ),
+  "figs/SV2_PERMANOVA_all_results.xlsx"
+)
+
+```
 
 
 
+```{r}
+
+round_stats <- function(df) {
+  df %>%
+    mutate(
+      R2 = round(R2, 3),
+      F_value = round(F_value, 3),
+      P_value = signif(P_value, 3)
+    )
+}
+
+stats_disease  <- round_stats(stats_disease)
+stats_subgroup <- round_stats(stats_subgroup)
+stats_pathogen <- round_stats(stats_pathogen)
+
+```
 
 
 

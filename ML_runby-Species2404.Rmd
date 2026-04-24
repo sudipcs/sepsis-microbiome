@@ -1,0 +1,1337 @@
+
+# 
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(data.table)
+library(cowplot)
+#library(Maaslin2)
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl) 
+library(caret)
+library(tidyverse)
+library(microbiome)
+library(MLmetrics)
+
+```
+
+#How to make phyloseq object:
+
+Reformat table:
+
+
+```{r}
+# ------------------------------------------------------------
+# 2️⃣ Read OTU table (Discovery cohort - DC)
+# ------------------------------------------------------------
+discDC <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx",
+                     sheet = "DC") %>% as.data.frame()
+
+# First column contains sample IDs → make them rownames
+rownames(discDC) <- discDC[[1]]
+discDC <- discDC[ , -1]
+
+# Remove unwanted PC samples (rows)
+remove_samples <- paste0("DC-PC", 1:13)
+discDC <- discDC[!rownames(discDC) %in% remove_samples, ]
+cat("Number of samples after removing PC samples:", nrow(discDC), "\n")
+
+# Transpose: rows = OTUs, cols = samples
+DCotumat <- t(discDC)
+
+# ------------------------------------------------------------
+# 3️⃣ Read taxonomy table
+# ------------------------------------------------------------
+taxonomy <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx",
+                       sheet = "OTU table all") %>% as.data.frame()
+
+# Use correct OTU ID column (ID.1) as rownames
+rownames(taxonomy) <- taxonomy$ID.1
+taxonomy <- taxonomy[ , !(colnames(taxonomy) %in% "ID.1") ]
+
+# Keep only OTUs present in both OTU and taxonomy tables
+common_otus <- intersect(rownames(DCotumat), rownames(taxonomy))
+cat("Number of OTUs in both OTU and taxonomy tables:", length(common_otus), "\n")
+
+# Subset OTU and taxonomy tables
+DCotumat_common <- DCotumat[common_otus, , drop=FALSE]
+taxonomy_common <- taxonomy[common_otus, , drop=FALSE]
+
+# Sanity check
+dim(DCotumat_common)
+dim(taxonomy_common)
+
+# ------------------------------------------------------------
+# 4️⃣ Build phyloseq object
+# ------------------------------------------------------------
+OTU <- otu_table(as.matrix(DCotumat_common), taxa_are_rows = TRUE)
+TAX <- tax_table(as.matrix(taxonomy_common))
+physeqDC <- phyloseq(OTU, TAX)
+cat("physeqDC - Samples:", nsamples(physeqDC), "OTUs:", ntaxa(physeqDC), "\n")
+
+## new added
+# 5️⃣ Add metadata
+# ------------------------------------------------------------
+meta_data <- read_excel("20250611_Overview samples for Animesh.xlsx", 
+                        sheet = "Metadata") %>% as.data.frame()
+
+# Filter for validation cohort 1
+meta_data <- meta_data[meta_data$Cohort == "Discovery cohort", ]
+
+# Rename columns
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[9] <- "DiseaseStatus"
+colnames(meta_data)[10] <- "DiseaseCausative"
+
+# Keep only rows that exist in SV1 OTU table
+meta_data_filtered <- meta_data[meta_data$Sample_ID %in% colnames(DCotumat_common), ]
+
+# Set rownames to match sample names in physeq
+rownames(meta_data_filtered) <- meta_data_filtered$Sample_ID
+
+# Create sample_data object
+sampledata <- sample_data(meta_data_filtered)
+
+# Merge with phyloseq
+physeqDC <- merge_phyloseq(physeqDC, sampledata)
+
+cat("physeqDC with metadata - Samples:", nsamples(physeqDC), 
+    "OTUs:", ntaxa(physeqDC), "\n")
+
+
+```
+
+
+# If you also have SV1 and SV2 phyloseq objects
+
+# prep SV1
+```{r}
+
+# ------------------------------------------------------------
+# 1️⃣ Read OTU table - SV1
+# ------------------------------------------------------------
+discSV1 <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx", 
+                      sheet = "SV 1") %>% as.data.frame()
+
+# first column = sample IDs
+rownames(discSV1) <- discSV1[[1]]
+discSV1 <- discSV1[ , -1]
+
+# transpose: rows = OTUs, cols = samples
+SV1otumat <- t(discSV1)
+
+# ------------------------------------------------------------
+# 2️⃣ Read taxonomy table
+# ------------------------------------------------------------
+taxonomy <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx",
+                       sheet = "OTU table all") %>% as.data.frame()
+
+# Use correct OTU ID column (ID.1) as rownames
+rownames(taxonomy) <- taxonomy$ID.1
+taxonomy <- taxonomy[ , !(colnames(taxonomy) %in% "ID.1") ]
+
+# ------------------------------------------------------------
+# 3️⃣ Keep only OTUs present in both OTU and taxonomy tables
+# ------------------------------------------------------------
+common_otus <- intersect(rownames(SV1otumat), rownames(taxonomy))
+cat("Number of OTUs in both OTU and taxonomy tables:", length(common_otus), "\n")
+
+# subset OTU and taxonomy tables
+SV1otumat_common <- SV1otumat[common_otus, , drop=FALSE]
+taxonomy_common <- taxonomy[common_otus, , drop=FALSE]
+
+# ------------------------------------------------------------
+# 4️⃣ Build phyloseq object
+# ------------------------------------------------------------
+OTU <- otu_table(as.matrix(SV1otumat_common), taxa_are_rows = TRUE)
+TAX <- tax_table(as.matrix(taxonomy_common))
+physeqSV1 <- phyloseq(OTU, TAX)
+
+cat("physeqSV1 - Samples:", nsamples(physeqSV1), 
+    "OTUs:", ntaxa(physeqSV1), "\n")
+
+# ------------------------------------------------------------
+# 5️⃣ Add metadata
+# ------------------------------------------------------------
+meta_data <- read_excel("20250611_Overview samples for Animesh.xlsx", 
+                        sheet = "Metadata") %>% as.data.frame()
+
+# Filter for validation cohort 1
+meta_data <- meta_data[meta_data$Cohort == "Validatie cohort 1", ]
+
+# Rename columns
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[9] <- "DiseaseStatus"
+colnames(meta_data)[10] <- "DiseaseCausative"
+
+# Keep only rows that exist in SV1 OTU table
+meta_data_filtered <- meta_data[meta_data$Sample_ID %in% colnames(SV1otumat_common), ]
+
+# Set rownames to match sample names in physeq
+rownames(meta_data_filtered) <- meta_data_filtered$Sample_ID
+
+# Create sample_data object
+sampledata <- sample_data(meta_data_filtered)
+
+# Merge with phyloseq
+physeqSV1 <- merge_phyloseq(physeqSV1, sampledata)
+
+cat("physeqSV1 with metadata - Samples:", nsamples(physeqSV1), 
+    "OTUs:", ntaxa(physeqSV1), "\n")
+
+```
+
+# prep SV2 data
+```{r}
+# ------------------------------------------------------------
+# 1️⃣ Read OTU table - SV2
+# ------------------------------------------------------------
+discSV2 <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx", 
+                      sheet = "SV 2") %>% as.data.frame()
+
+# Suppose the first column contains the row IDs (sample names)
+rownames(discSV2) <- discSV2[[1]]
+discSV2 <- discSV2[ , -1]  # remove the first column after assigning rownames
+
+# Now remove rows that contain "SV2-Blanco"
+discSV2 <- discSV2[!grepl("^SV2-Blanco", rownames(discSV2)), ]
+
+cat("Number of rows after removing blanks:", nrow(discSV2), "\n")
+
+# transpose: rows = OTUs, cols = samples
+SV2otumat <- t(discSV2)
+
+# ------------------------------------------------------------
+# 2️⃣ Read taxonomy table
+# ------------------------------------------------------------
+taxonomy <- read_excel("20250512_OTU tables_percohort_sepsis prediction model.xlsx",
+                       sheet = "OTU table all") %>% as.data.frame()
+
+# Use correct OTU ID column (ID.1) as rownames
+rownames(taxonomy) <- taxonomy$ID.1
+taxonomy <- taxonomy[ , !(colnames(taxonomy) %in% "ID.1") ]
+
+# ------------------------------------------------------------
+# 3️⃣ Keep only OTUs present in both OTU and taxonomy tables
+# ------------------------------------------------------------
+common_otus <- intersect(rownames(SV2otumat), rownames(taxonomy))
+cat("Number of OTUs in both OTU and taxonomy tables:", length(common_otus), "\n")
+
+SV2otumat_common <- SV2otumat[common_otus, , drop=FALSE]
+taxonomy_common <- taxonomy[common_otus, , drop=FALSE]
+
+# ------------------------------------------------------------
+# 4️⃣ Build phyloseq object
+# ------------------------------------------------------------
+OTU <- otu_table(as.matrix(SV2otumat_common), taxa_are_rows = TRUE)
+TAX <- tax_table(as.matrix(taxonomy_common))
+physeqSV2 <- phyloseq(OTU, TAX)
+
+cat("physeqSV2 - Samples:", nsamples(physeqSV2), 
+    "OTUs:", ntaxa(physeqSV2), "\n")
+
+# ------------------------------------------------------------
+# 5️⃣ Add metadata
+# ------------------------------------------------------------
+meta_data <- read_excel("20250611_Overview samples for Animesh.xlsx", 
+                        sheet = "Metadata") %>% as.data.frame()
+
+# Filter for validation cohort 2
+meta_data <- meta_data[meta_data$Cohort == "Validatie cohort 2", ]
+
+# Rename columns
+colnames(meta_data)[7] <- "Timeperiods"
+colnames(meta_data)[9] <- "DiseaseStatus"
+colnames(meta_data)[10] <- "DiseaseCausative"
+
+# Keep only rows that exist in SV2 OTU table
+meta_data_filtered <- meta_data[meta_data$Sample_ID %in% colnames(SV2otumat_common), ]
+
+# Set rownames to match sample names in physeq
+rownames(meta_data_filtered) <- meta_data_filtered$Sample_ID
+
+# Create sample_data object
+sampledata <- sample_data(meta_data_filtered)
+
+# Merge with phyloseq
+physeqSV2 <- merge_phyloseq(physeqSV2, sampledata)
+
+cat("physeqSV2 with metadata - Samples:", nsamples(physeqSV2), 
+    "OTUs:", ntaxa(physeqSV2), "\n")
+
+```
+
+# til sv2
+
+## newruns for species level
+
+```{r}
+
+# Assume physeqDC already has sample_data merged
+physeq_full <- physeqDC   # no time-period filtering
+# Collapse OTUs to species level
+physeq_full_species <- tax_glom(physeq_full, taxrank = "Species") # Species
+physeqSV1_species    <- tax_glom(physeqSV1, taxrank = "Species")
+physeqSV2_species    <- tax_glom(physeqSV2, taxrank = "Species")
+
+# If Species has many missing values, you could use Genus instead:
+  # tax_glom(physeq_full, taxrank = "Genus")
+
+```
+
+
+```{r}
+# Compute common features across cohorts
+
+# Extract OTU tables (now species-level)
+otu_full    <- as.data.frame(t(otu_table(physeq_full_species)))
+otu_sv1     <- as.data.frame(t(otu_table(physeqSV1_species)))
+otu_sv2     <- as.data.frame(t(otu_table(physeqSV2_species)))
+
+# Keep only species present in all three cohorts
+common_species <- Reduce(intersect, list(
+  colnames(otu_full),
+  colnames(otu_sv1),
+  colnames(otu_sv2)
+))
+cat("Number of common species:", length(common_species), "\n")
+
+
+```
+
+
+# Subset OTU tables to common species CLR transform and z-normalize
+
+
+```{r}
+
+otu_full <- otu_full[, common_species, drop = FALSE]
+otu_sv1  <- otu_sv1[, common_species, drop = FALSE]
+otu_sv2  <- otu_sv2[, common_species, drop = FALSE]
+
+# transform and z-normalize
+# Add 1 (or 0.5) to all counts to avoid zeros
+otu_full_pseudo <- otu_full + 1
+otu_full_clr   <- microbiome::transform(otu_full_pseudo, "clr")
+#otu_full_clr   <- microbiome::transform(otu_full, "clr")
+otu_full_clr_z <- scale(otu_full_clr)
+train_mean     <- attr(otu_full_clr_z, "scaled:center")
+train_sd       <- attr(otu_full_clr_z, "scaled:scale")
+
+# Combine with metadata
+meta_full <- data.frame(sample_data(physeq_full_species))
+meta_full$DiseaseStatus <- ifelse(
+  meta_full$DiseaseStatus %in% c("LOS","Gut-derived LOS","1"),
+  "LOS","Control"
+)
+meta_full$DiseaseStatus <- factor(meta_full$DiseaseStatus, levels = c("Control","LOS"))
+
+#dc_df <- as.data.frame(otu_full_clr_z) %>%
+#         mutate(DiseaseStatus = meta_full$DiseaseStatus)
+
+# CLR + z-normalized OTU/species table
+dc_df <- as.data.frame(otu_full_clr_z)
+# 2️⃣ Keep only numeric columns
+num_cols <- sapply(dc_df, is.numeric)
+dc_df_num <- dc_df[, num_cols, drop = FALSE]
+# 3️⃣ Replace NaN/Inf with 0
+dc_df_num[!is.finite(as.matrix(dc_df_num))] <- 0
+# 4️⃣ Remove zero-variance columns
+nonzero_var <- apply(dc_df_num, 2, function(x) var(x, na.rm = TRUE) > 0)
+# Check if we have any columns left
+if(sum(nonzero_var) == 0){
+  stop("No non-zero-variance features available after cleaning.")
+}
+
+dc_df_num <- dc_df_num[, nonzero_var, drop = FALSE]
+# 5️⃣ Add DiseaseStatus
+dc_df <- dc_df_num
+dc_df$DiseaseStatus <- meta_full$DiseaseStatus
+# 6️⃣ Quick check
+cat("Number of predictors:", ncol(dc_df) - 1, "\n")
+table(dc_df$DiseaseStatus)
+
+```
+
+
+## runs- show DC metrics
+
+```{r}
+# Impute missing values in the full dataframe
+dc_df[is.na(dc_df)] <- 0   # replace all NA with 0
+## --- Custom summary function ----------------------------------
+train_index <- createDataPartition(dc_df$DiseaseStatus, p = 0.8, list = FALSE)
+train_set   <- dc_df[train_index, ]
+test_set    <- dc_df[-train_index, ]
+
+multiSummary <- function(data, lev = NULL, model = NULL) {
+  # data has: obs (true labels), pred (predicted labels), prob for each class
+  out <- c()
+  
+  # Sensitivity & Specificity
+  sens <- sensitivity(data$pred, data$obs, positive = lev[2])
+  spec <- specificity(data$pred, data$obs, negative = lev[1])
+  
+  # AUROC
+  roc  <- tryCatch(pROC::roc(response = data$obs,
+                             predictor = data[, lev[2]],
+                             levels = rev(lev),
+                             quiet = TRUE)$auc,
+                   error = function(e) NA)
+  
+  # Precision, Recall, F1
+  prec <- Precision(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  rec  <- Recall(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  f1   <- F1_Score(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  
+  out <- c(ROC = roc, Sens = sens, Spec = spec,
+           Precision = prec, Recall = rec, F1 = f1)
+  return(out)
+}
+
+## --- Train Control --------------------------------------------
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 10, repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiSummary,
+  savePredictions = "final"
+)
+
+## --- Train model ----------------------------------------------
+set.seed(123)
+rf_model <- train(
+  DiseaseStatus ~ .,
+  data       = train_set,
+  method     = "ranger",
+  metric     = "ROC",
+  tuneGrid   = expand.grid(
+                 mtry          = floor(sqrt(ncol(train_set) - 1)),
+                 splitrule     = "gini",
+                 min.node.size = 1
+               ),
+  trControl  = ctrl,
+  importance = "impurity"
+)
+
+## --- Extract results ------------------------------------------
+results <- rf_model$resample[, c("ROC","Sens","Spec","Precision","Recall","F1")]
+
+summary_table <- data.frame(
+  Average = colMeans(results, na.rm = TRUE),
+  SD      = apply(results, 2, sd, na.rm = TRUE)
+)
+
+# transpose so rows = Average/SD, columns = metrics
+summary_table <- t(summary_table)
+
+print(summary_table)
+
+
+
+```
+
+# extra for ROC
+```{r}
+## ------------------------------------------------------------
+## Libraries
+## ------------------------------------------------------------
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+## ------------------------------------------------------------
+## Extract cross-validated predictions from caret model
+## ------------------------------------------------------------
+pred <- rf_model$pred
+
+# Ensure outcome is a factor with correct levels
+pred$obs <- factor(pred$obs)
+
+# Identify positive class (caret convention: 2nd level)
+positive_class <- levels(pred$obs)[2]
+
+## ------------------------------------------------------------
+## Compute ROC and AUROC
+## ------------------------------------------------------------
+roc_discovery <- roc(
+  response  = pred$obs,
+  predictor = pred[[positive_class]],
+  levels    = levels(pred$obs),
+  direction = "<"
+)
+
+auc_val <- auc(roc_discovery)
+
+###
+
+roc_plot <- ggroc(
+  roc_discovery,
+  colour = "black",
+  size = 1.2,
+  legacy.axes = TRUE
+) +
+  ggtitle(paste0(
+    "ROC Curve – Discovery Cohort (CV)\nAUC = ",
+    round(auc_val, 3)
+  )) +
+  theme_minimal() +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    colour = "grey50"
+  ) +
+  coord_equal() +
+  xlim(0, 1) +
+  ylim(0, 1)
+
+# Show plot
+print(roc_plot)
+
+# Save as PDF
+ggsave(
+  filename = "6aROC_Curve_Discovery.pdf",
+  plot = roc_plot,
+  width = 8,
+  height = 6,
+  device = cairo_pdf
+)
+
+
+
+```
+
+
+## PR-AUC for Discovery Cohort (CV)
+
+```{r}
+library(PRROC)
+pred <- rf_model$pred
+
+# Ensure factor
+pred$obs <- factor(pred$obs)
+
+# Positive class (Ecoli_LOS)
+positive_class <- levels(pred$obs)[2]
+
+# Convert to binary labels
+truth <- ifelse(pred$obs == positive_class, 1, 0)
+
+# Predicted probabilities
+scores <- pred[[positive_class]]
+pr_discovery <- pr.curve(
+  scores.class0 = scores[truth == 1],
+  scores.class1 = scores[truth == 0],
+  curve = TRUE
+)
+
+pr_auc_val <- pr_discovery$auc.integral
+
+print(paste("Discovery PR-AUC:", round(pr_auc_val, 3)))
+baseline <- mean(truth)
+plot(
+  pr_discovery,
+  auc.main = FALSE,
+  main = paste0(
+    "PR Curve – Discovery Cohort (CV)\nPR-AUC = ",
+    round(pr_auc_val, 3),
+    " | baseline = ",
+    round(baseline, 3)
+  )
+)
+
+abline(h = baseline, col = "red", lty = 2)
+
+pdf("PR_Curve_Discovery.pdf", width = 8, height = 6)
+
+plot(
+  pr_discovery,
+  auc.main = FALSE,
+  main = paste0(
+    "PR Curve – Discovery Cohort (CV)\nPR-AUC = ",
+    round(pr_auc_val, 3),
+    " | baseline = ",
+    round(baseline, 3)
+  )
+)
+
+abline(h = baseline, col = "red", lty = 2)
+
+dev.off()
+```
+
+
+
+
+
+```{r}
+
+library(ggplot2)
+
+# Extract variable importance
+var_imp <- varImp(rf_model)$importance
+
+# Add Original_ID column directly from rownames
+var_imp$Original_ID <- rownames(var_imp)
+
+# Order by importance descending
+var_imp_ordered <- var_imp[order(-var_imp$Overall), ]
+
+# Select top 20
+top20 <- head(var_imp_ordered, 20)
+
+# Plot
+ggplot(top20, aes(x = reorder(Original_ID, Overall), y = Overall)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(x = "Original-ID", y = "Importance", title = "Top 20 OTUs by Importance") +
+  theme_minimal()
+
+
+```
+
+
+
+
+# new ml run for top features
+```{r}
+library(caret)
+library(ranger)
+library(pROC)
+library(MLmetrics)
+library(dplyr)
+
+# -------------------------------
+# 1️⃣ Extract top significant features from the first RF model
+# -------------------------------
+
+# Get variable importance
+rf_varimp <- varImp(rf_model, scale = TRUE)$importance
+
+# Sort by importance (descending) and take top N features
+top_n <- 10  # choose how many top features you want
+sig_features <- rownames(rf_varimp)[order(rf_varimp$Overall, decreasing = TRUE)][1:top_n]
+
+# Add the outcome column
+sig_features <- c(sig_features, "DiseaseStatus")
+
+# Subset the dataframe to only these features
+dc_sig_df <- dc_df[, sig_features]
+
+# -------------------------------
+# 2️⃣ Train-test split
+# -------------------------------
+set.seed(123)
+train_index <- createDataPartition(dc_sig_df$DiseaseStatus, p = 0.8, list = FALSE)
+train_set <- dc_sig_df[train_index, ]
+test_set  <- dc_sig_df[-train_index, ]
+
+# -------------------------------
+# 3️⃣ Custom summary function
+# -------------------------------
+multiSummary <- function(data, lev = NULL, model = NULL) {
+  out <- c()
+  sens <- sensitivity(data$pred, data$obs, positive = lev[2])
+  spec <- specificity(data$pred, data$obs, negative = lev[1])
+  roc  <- tryCatch(
+    pROC::roc(response = data$obs, predictor = data[, lev[2]], levels = rev(lev), quiet = TRUE)$auc,
+    error = function(e) NA
+  )
+  prec <- Precision(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  rec  <- Recall(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  f1   <- F1_Score(y_pred = data$pred, y_true = data$obs, positive = lev[2])
+  out <- c(ROC = roc, Sens = sens, Spec = spec, Precision = prec, Recall = rec, F1 = f1)
+  return(out)
+}
+
+# -------------------------------
+# 4️⃣ Train control
+# -------------------------------
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 10, repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiSummary,
+  savePredictions = "final"
+)
+
+# -------------------------------
+# 5️⃣ Train RF on top features
+# -------------------------------
+set.seed(123)
+rf_top_model <- train(
+  DiseaseStatus ~ .,
+  data       = train_set,
+  method     = "ranger",
+  metric     = "ROC",
+  tuneGrid   = expand.grid(
+    mtry          = floor(sqrt(ncol(train_set) - 1)),
+    splitrule     = "gini",
+    min.node.size = 1
+  ),
+  trControl  = ctrl,
+  importance = "impurity"
+)
+
+# -------------------------------
+# 6️⃣ Extract CV results
+# -------------------------------
+results_top <- rf_top_model$resample[, c("ROC","Sens","Spec","Precision","Recall","F1")]
+
+summary_table_top <- data.frame(
+  Average = colMeans(results_top, na.rm = TRUE),
+  SD      = apply(results_top, 2, sd, na.rm = TRUE)
+)
+
+# Transpose for readability
+summary_table_top <- t(summary_table_top)
+
+print(summary_table_top)
+
+# -------------------------------
+# 7️⃣ Optional: plot variable importance for top features
+# -------------------------------
+varImp_top <- varImp(rf_top_model, scale = TRUE)
+print(varImp_top)
+
+
+```
+
+
+
+
+# change every time file name 
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(readxl)
+
+# --- 1️⃣ Extract variable importance ---
+var_imp <- varImp(rf_model)$importance
+
+# Add Original_ID directly from rownames
+var_imp$Original_ID <- rownames(var_imp)
+
+# Order by importance descending and add Rank
+var_imp <- var_imp[order(-var_imp$Overall), ]
+var_imp$Rank <- 1:nrow(var_imp)
+
+# Top 20
+top20 <- head(var_imp, 20)
+
+# --- 2️⃣ Plot top 20 OTUs ---
+ggplot(top20, aes(x = reorder(Original_ID, Overall), y = Overall)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(x = "Original-ID", y = "Importance", title = "Top 20 OTUs by Importance") +
+  theme_minimal()
+
+# --- 3️⃣ Merge taxonomy info ---
+tax <- read_excel(
+  "20250512_OTU tables_percohort_sepsis prediction model.xlsx",
+  sheet = "OTU table all"
+) %>%
+  mutate(ID.1 = as.character(ID.1))
+
+top20 <- top20 %>%
+  mutate(Original_ID = as.character(Original_ID)) %>%
+  left_join(tax %>% select(ID.1, Family, Genus, Species),
+            by = c("Original_ID" = "ID.1")) %>%
+  select(Rank, Original_ID, Family, Genus, Species, Overall)
+
+# --- 4️⃣ Create table grob ---
+tab_grob <- tableGrob(
+  top20,
+  rows = NULL,
+  theme = ttheme_default(
+    core   = list(fg_params = list(cex = 0.8)),
+    colhead= list(fg_params = list(cex = 1, fontface = "bold"))
+  )
+)
+
+title <- textGrob("Top 20 OTUs with Taxonomy",
+                  gp = gpar(fontsize = 16, fontface = "bold"))
+
+# --- 5️⃣ Save as PNG ---
+png("Species_Top20_OTU_Taxonomy.png", width = 2000, height = 1400, res = 200)
+grid.arrange(title, tab_grob, ncol = 1, heights = c(0.1, 0.8, 0.1))
+dev.off()
+
+
+
+```
+
+
+
+# --- Function to prepare validation set ---
+
+```{r}
+prepare_validation <- function(physeq_obj, train_mean, train_sd, dc_features) {
+  
+  # 1️⃣ Extract OTU table (samples × features)
+  otu_df <- as.data.frame(t(otu_table(physeq_obj)))
+  otu_df[] <- lapply(otu_df, as.numeric)
+
+  # 2️⃣ Keep shared features
+  otu_df <- otu_df[, intersect(colnames(otu_df), dc_features), drop = FALSE]
+
+  # 3️⃣ Add missing features as zeros (SAFE)
+  missing_feats <- setdiff(dc_features, colnames(otu_df))
+  if (length(missing_feats) > 0) {
+    zero_mat <- matrix(
+      0,
+      nrow = nrow(otu_df),
+      ncol = length(missing_feats),
+      dimnames = list(rownames(otu_df), missing_feats)
+    )
+    otu_df <- cbind(otu_df, zero_mat)
+  }
+
+  # 4️⃣ Reorder to discovery feature order
+  otu_df <- otu_df[, dc_features, drop = FALSE]
+
+  # 5️⃣ Add pseudocount (CRITICAL)
+  otu_df <- otu_df + 1e-6
+
+  # 6️⃣ CLR transform (MUST be matrix)
+  otu_clr <- microbiome::transform(as.matrix(otu_df), "clr")
+
+  # 7️⃣ Z-score using discovery stats
+  otu_clr_z <- scale(otu_clr, center = train_mean, scale = train_sd)
+
+  # 8️⃣ Metadata + label
+  meta <- data.frame(sample_data(physeq_obj))
+  meta$DiseaseStatus <- ifelse(
+    meta$DiseaseStatus %in% c("LOS", "Gut-derived LOS", "1"),
+    "LOS",
+    "Control"
+  )
+  meta$DiseaseStatus <- factor(meta$DiseaseStatus, levels = c("Control", "LOS"))
+
+  # 9️⃣ Combine
+  df <- as.data.frame(otu_clr_z)
+  df$DiseaseStatus <- meta$DiseaseStatus
+
+  return(df)
+}
+
+
+
+# --- Prepare SV1 validation set ---
+sv1_df <- prepare_validation(physeqSV1, train_mean, train_sd, colnames(otu_full))
+
+# --- Prepare SV2 validation set ---
+sv2_df <- prepare_validation(physeqSV2, train_mean, train_sd, colnames(otu_full))
+
+nrow(sv1_df); nrow(sv2_df)
+
+remove_zero_var <- function(df, label = "DiseaseStatus") {
+
+  stopifnot(label %in% colnames(df))
+
+  feats <- setdiff(colnames(df), label)
+
+  # Compute variance safely
+  vars <- apply(
+    df[, feats, drop = FALSE],
+    2,
+    function(x) var(x, na.rm = TRUE)
+  )
+
+  # Keep finite & non-zero variance features
+  keep_feats <- names(vars)[is.finite(vars) & vars > 0]
+
+  # ⚠️ If none survive, warn but keep label
+  if (length(keep_feats) == 0) {
+    warning("All features have zero variance in validation set")
+    return(df[, label, drop = FALSE])
+  }
+
+  # Final safe subset
+  keep_cols <- intersect(c(keep_feats, label), colnames(df))
+
+  df[, keep_cols, drop = FALSE]
+}
+
+
+
+```
+
+
+# not working 
+```{r}
+# --- Function to prepare validation set ---
+prepare_validation <- function(physeq_obj, train_mean, train_sd, dc_features) {
+  
+  # 1️⃣ Extract OTU table and transpose
+  otu_df <- as.data.frame(t(otu_table(physeq_obj)))
+  
+  # 2️⃣ Keep only the features present in the discovery set
+  otu_df <- otu_df[, intersect(colnames(otu_df), dc_features), drop = FALSE]
+  
+  # 3️⃣ Add missing features as zeros
+  missing_feats <- setdiff(dc_features, colnames(otu_df))
+  if(length(missing_feats) > 0) {
+    otu_df[, missing_feats] <- 0
+  }
+  
+  # 4️⃣ Reorder columns to match discovery set
+  otu_df <- otu_df[, dc_features]
+  
+  # 5️⃣ CLR transform
+  otu_clr <- microbiome::transform(otu_df, "clr")
+  
+  # 6️⃣ Z-normalise using discovery mean and sd
+  otu_clr_z <- scale(otu_clr, center = train_mean, scale = train_sd)
+  
+  # 7️⃣ Extract metadata and recode labels
+  meta <- data.frame(sample_data(physeq_obj))
+  meta$DiseaseStatus <- ifelse(meta$DiseaseStatus %in% c("LOS", "Gut-derived LOS", "1"),
+                               "LOS",
+                               "Control")
+  meta$DiseaseStatus <- factor(meta$DiseaseStatus, levels = c("Control", "LOS"))
+  
+  # 8️⃣ Combine OTU + labels
+  df <- as.data.frame(otu_clr_z) %>%
+        mutate(DiseaseStatus = meta$DiseaseStatus)
+  
+  return(df)
+}
+
+# --- Prepare SV1 validation set ---
+sv1_df <- prepare_validation(physeqSV1, train_mean, train_sd, colnames(otu_full))
+
+# --- Prepare SV2 validation set ---
+sv2_df <- prepare_validation(physeqSV2, train_mean, train_sd, colnames(otu_full))
+
+nrow(sv1_df); nrow(sv2_df)
+```
+```{r}
+dim(sv1_df)           # rows = samples, cols = features+1
+apply(sv1_df[, -ncol(sv1_df)], 2, var)  # check for zero variance columns
+# keep only features with variance > 0
+sv1_df <- sv1_df[, c(apply(sv1_df[, -ncol(sv1_df)], 2, var) > 0, TRUE)]
+
+```
+
+## wrong
+```{r}
+
+# Extract CV predictions
+pred <- rf_model$pred
+
+# Ensure correct factor levels
+pred$obs <- factor(pred$obs, levels = c("Control", "LOS"))
+
+# Predicted probabilities
+sv1_prob <- predict(rf_model, sv1_df, type = "prob")[, "LOS"]
+
+# ROC + AUC
+roc_sv1 <- roc(
+  response  = sv1_df$DiseaseStatus,
+  predictor = sv1_prob,
+  levels    = c("Control", "LOS"),
+  direction = "<"
+)
+
+auc_sv1 <- auc(roc_sv1)
+
+# Plot
+ggroc(roc_sv1, size = 1.2) +
+  theme_minimal() +
+  ggtitle(paste0(
+    "SV1 Validation Cohort\nAUC = ",
+    round(auc_sv1, 3)
+  )) +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+
+# Predicted probabilities
+sv2_prob <- predict(rf_model, sv2_df, type = "prob")[, "LOS"]
+
+# ROC + AUC
+roc_sv2 <- roc(
+  response  = sv2_df$DiseaseStatus,
+  predictor = sv2_prob,
+  levels    = c("Control", "LOS"),
+  direction = "<"
+)
+
+auc_sv2 <- auc(roc_sv2)
+
+# Plot
+ggroc(roc_sv2, size = 1.2) +
+  theme_minimal() +
+  ggtitle(paste0(
+    "SV2 Validation Cohort\nAUC = ",
+    round(auc_sv2, 3)
+  )) +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+
+
+# Predictions on SV1
+sv1_pred <- predict(rf_model, sv1_df, type = "prob")
+sv1_class <- predict(rf_model, sv1_df)
+
+# Predictions on SV2
+sv2_pred <- predict(rf_model, sv2_df, type = "prob")
+sv2_class <- predict(rf_model, sv2_df)
+
+library(pROC)  # for ROC/AUC
+
+# --- Function to compute ROC/AUC ---
+compute_roc <- function(model, df) {
+  # Get predicted probabilities for "LOS"
+  probs <- predict(model, df, type = "prob")[, "LOS"]
+  
+  # True labels (0/1 as factor)
+  truth <- df$DiseaseStatus
+  
+  # ROC object
+  roc_obj <- roc(response = truth,
+                 predictor = probs,
+                 levels = c("Control", "LOS"),  # reference first
+                 direction = "<")
+  
+  # AUC
+  auc_val <- auc(roc_obj)
+  
+  # Plot
+  plot(roc_obj, main = paste0("ROC curve (AUC = ", round(auc_val, 3), ")"))
+  
+  return(list(roc = roc_obj, auc = auc_val))
+}
+
+# --- SV1 ROC/AUC ---
+sv1_roc <- compute_roc(rf_model, sv1_df)
+
+# --- SV2 ROC/AUC ---
+sv2_roc <- compute_roc(rf_model, sv2_df)
+
+
+```
+
+
+
+# try new roc working
+
+
+```{r}
+
+sv1_plot <- ggroc(
+  roc_sv1,
+  size = 1.2,
+  legacy.axes = TRUE
+) +
+  theme_minimal() +
+  ggtitle(paste0(
+    "SV1 Validation Cohort\nAUC = ",
+    round(auc_sv1, 3)
+  )) +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    colour = "grey50"
+  ) +
+  coord_equal() +
+  xlim(0, 1) +
+  ylim(0, 1)
+
+print(sv1_plot)
+ggsave(
+  filename = "6b.ROC_Curve_SV1.pdf",
+  plot = sv1_plot,
+  width = 8,
+  height = 6,
+  device = cairo_pdf
+)
+
+###
+sv2_plot <- ggroc(
+  roc_sv2,
+  size = 1.2,
+  legacy.axes = TRUE
+) +
+  theme_minimal() +
+  ggtitle(paste0(
+    "SV2 Validation Cohort\nAUC = ",
+    round(auc_sv2, 3)
+  )) +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    colour = "grey50"
+  ) +
+  coord_equal() +
+  xlim(0, 1) +
+  ylim(0, 1)
+
+ggsave(
+  filename = "6c.ROC_Curve_SV2.pdf",
+  plot = sv2_plot,
+  width = 8,
+  height = 6,
+  device = cairo_pdf
+)
+
+```
+
+
+## PR AUC for SV1/2
+
+
+```{r}
+
+library(PRROC)
+
+# =========================================================
+# SV1 PR-AUC
+# =========================================================
+
+# Predictions
+sv1_prob <- predict(rf_model, sv1_df, type = "prob")[, "LOS"]
+
+sv1_truth <- ifelse(sv1_df$DiseaseStatus == "LOS", 1, 0)
+
+# PR curve
+pr_sv1 <- PRROC::pr.curve(
+  scores.class0 = sv1_prob[sv1_truth == 1],
+  scores.class1 = sv1_prob[sv1_truth == 0],
+  curve = TRUE
+)
+
+pr_auc_sv1 <- pr_sv1$auc.integral
+baseline_sv1 <- mean(sv1_truth)
+
+print(paste("SV1 PR-AUC:", round(pr_auc_sv1, 3)))
+
+
+# =========================================================
+# SV2 PR-AUC
+# =========================================================
+
+# Predictions
+sv2_prob <- predict(rf_model, sv2_df, type = "prob")[, "LOS"]
+
+sv2_truth <- ifelse(sv2_df$DiseaseStatus == "LOS", 1, 0)
+
+# PR curve
+pr_sv2 <- PRROC::pr.curve(
+  scores.class0 = sv2_prob[sv2_truth == 1],
+  scores.class1 = sv2_prob[sv2_truth == 0],
+  curve = TRUE
+)
+
+pr_auc_sv2 <- pr_sv2$auc.integral
+baseline_sv2 <- mean(sv2_truth)
+
+print(paste("SV2 PR-AUC:", round(pr_auc_sv2, 3)))
+
+pdf("PR_Curve_SV1.pdf", width = 8, height = 6)
+
+plot(
+  pr_sv1,
+  auc.main = FALSE,
+  main = paste0("SV1 PR-AUC = ", round(pr_auc_sv1, 3))
+)
+
+abline(h = baseline_sv1, col = "red", lty = 2)
+
+dev.off()
+
+pdf("PR_Curve_SV2.pdf", width = 8, height = 6)
+
+plot(
+  pr_sv2,
+  auc.main = FALSE,
+  main = paste0("SV2 PR-AUC = ", round(pr_auc_sv2, 3))
+)
+
+abline(h = baseline_sv2, col = "red", lty = 2)
+
+dev.off()
+
+```
+
+
+
+```{r}
+
+# -------------------------
+# SV2 predictions
+# -------------------------
+sv2_df_clean <- sv2_df[complete.cases(sv2_df), ]
+
+sv2_pred <- predict(rf_model, sv2_df_clean, type = "prob")
+sv2_prob <- sv2_pred[, "Ecoli_LOS"]
+
+sv2_truth <- ifelse(sv2_df_clean$Ecoli_Status == "Ecoli_LOS", 1, 0)
+
+# -------------------------
+# PR curve + PR-AUC
+# -------------------------
+pr_sv2 <- PRROC::pr.curve(
+  scores.class0 = sv2_prob[sv2_truth == 1],
+  scores.class1 = sv2_prob[sv2_truth == 0],
+  curve = TRUE
+)
+
+pr_auc_sv2 <- pr_sv2$auc.integral
+print(paste("SV2 PR-AUC:", round(pr_auc_sv2, 3)))
+
+baseline_sv2 <- mean(sv2_truth)
+
+pdf("PR_Curve_SV2.pdf", width = 8, height = 6)
+
+plot(
+  pr_sv2,
+  auc.main = FALSE,
+  main = paste0(
+    "SV2 PR Curve\nPR-AUC = ",
+    round(pr_auc_sv2, 3),
+    " | baseline = ",
+    round(baseline_sv2, 3)
+  )
+)
+
+abline(h = baseline_sv2, col = "red", lty = 2)
+
+dev.off()
+
+```
+
+
+
+```{r}
+library(caret)
+
+# --- SV1 Metrics ---
+sv1_cm <- confusionMatrix(sv1_class, sv1_df$DiseaseStatus, positive = "LOS")
+sv1_cm
+```
+```{r}
+# --- SV2 Metrics ---
+sv2_cm <- confusionMatrix(sv2_class, sv2_df$DiseaseStatus, positive = "LOS")# 
+sv2_cm
+```
+
+
+```{r}
+library(caret)
+library(pROC)
+library(MLmetrics)
+
+# Predicted classes and probabilities
+sv1_class <- predict(rf_model, sv1_df)
+sv1_prob  <- predict(rf_model, sv1_df, type = "prob")[, "LOS"]  # probability for LOS
+
+# Confusion Matrix
+cm <- confusionMatrix(sv1_class, sv1_df$DiseaseStatus, positive = "LOS")
+
+# Extract Accuracy, Sensitivity, Specificity
+accuracy    <- cm$overall["Accuracy"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+# Precision
+precision <- Precision(y_pred = sv1_class, y_true = sv1_df$DiseaseStatus, positive = "LOS")
+
+# F1 Score
+f1 <- F1_Score(y_pred = sv1_class, y_true = sv1_df$DiseaseStatus, positive = "LOS")
+
+# AUC
+roc_obj <- roc(response = sv1_df$DiseaseStatus,
+               predictor = sv1_prob,
+               levels = c("Control","LOS"), direction = "<")
+auc_val <- auc(roc_obj)
+
+# Print all
+metrics <- data.frame(
+  Accuracy    = accuracy,
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  Precision   = precision,
+  F1          = f1,
+  AUC         = as.numeric(auc_val)
+)
+print(metrics)
+
+```
+
+
+```{r}
+library(caret)
+library(pROC)
+library(MLmetrics)
+
+# Predicted classes and probabilities
+sv2_class <- predict(rf_model, sv2_df)
+sv2_prob  <- predict(rf_model, sv2_df, type = "prob")[, "LOS"]  # probability for LOS
+
+# Confusion Matrix
+cm <- confusionMatrix(sv2_class, sv2_df$DiseaseStatus, positive = "LOS")
+
+# Extract Accuracy, Sensitivity, Specificity
+accuracy    <- cm$overall["Accuracy"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+
+# Precision
+precision <- Precision(y_pred = sv2_class, y_true = sv2_df$DiseaseStatus, positive = "LOS")
+
+# F1 Score
+f1 <- F1_Score(y_pred = sv2_class, y_true = sv2_df$DiseaseStatus, positive = "LOS")
+
+# AUC
+roc_obj <- roc(response = sv2_df$DiseaseStatus,
+               predictor = sv2_prob,
+               levels = c("Control","LOS"), direction = "<")
+auc_val <- auc(roc_obj)
+
+# Print all
+metrics <- data.frame(
+  Accuracy    = accuracy,
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  Precision   = precision,
+  F1          = f1,
+  AUC         = as.numeric(auc_val)
+)
+print(metrics)
+
+```
+```{r}
+common_species
+
+```
+

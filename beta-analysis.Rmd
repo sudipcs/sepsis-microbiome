@@ -1,0 +1,811 @@
+---
+title: "disc_selection"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2026-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("phyloseq")
+# 
+# if(!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("Maaslin2")
+# 
+# install.packages("Matrix")
+# install.packages("pgirmess")
+# install.packages("agricolae")
+# install.packages("ggpubr")
+# install.packages("gt")
+# install.packages("FSA")
+```
+
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(ggpubr)
+library(data.table)
+library(cowplot)
+
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(FSA)
+library(Maaslin2)
+# https://huttenhower.sph.harvard.edu/maaslin2/
+library(tidyverse)
+library(lmerTest)
+library(phyloseq)
+library(vegan)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+
+```
+
+
+```{r}
+filname= "20260326_Overview samples for Animesh_addedclinicalparameters.xlsx"
+#phy.red <- readRDS("phyloseq_discDC_red.rds")
+
+phy_disc <- readRDS("phyloseq_discDC_red.rds")
+phy_val1 <- readRDS("phyloseq_val_one.rds")
+phy_val2 <- readRDS("phyloseq_val_two.rds")
+
+meta_phy <- data.frame(sample_data(phy_disc)) %>%
+  mutate(Sample_ID = rownames(.)) %>%
+  rename(Patient_ID = Patient.ID)
+
+meta <- read_excel(filname, sheet = "Metadata") %>%
+  rename(
+    Patient_ID = `Patient-ID`,
+    Gestational_age = `Gestational age (days)`,
+    Birth_weight = `Birth weight (grams)`,
+    Center = `Center of birth`,
+    AB_ratio = AB_IV_days_beforet0_ratio,
+    Feeding_type = `Feeding type at full enteral feeding`,
+    Mode_delivery = `Mode of delivery`,
+    Week_of_life = Sample_week_of_life,
+    Invasive_device = Invasive_medical_device_beforet0,
+    Storage_years = Storage_duration_years
+  )
+
+meta_clean <- meta %>%
+  group_by(Patient_ID) %>%
+  summarise(across(everything(), ~ first(na.omit(.))), .groups = "drop")
+
+df <- meta_phy %>%
+  select(-any_of("Cohort")) %>%   # remove duplicate if exists
+  left_join(meta_clean, by = "Patient_ID") %>%
+  filter(!is.na(Cohort))
+
+
+
+prepare_phyloseq <- function(phy_obj, cohort_name, meta_clean) {
+  
+  # Extract phyloseq metadata
+  meta_phy <- data.frame(sample_data(phy_obj))
+  
+  # 🔥 ALWAYS define Sample_ID from phyloseq
+  meta_phy$Sample_ID <- phyloseq::sample_names(phy_obj)
+  
+  # Rename Patient ID (adjust if needed)
+  meta_phy <- meta_phy %>%
+    rename(Patient_ID = Patient.ID)
+  
+  # Ensure same type
+  meta_phy$Patient_ID <- as.character(meta_phy$Patient_ID)
+  meta_clean$Patient_ID <- as.character(meta_clean$Patient_ID)
+  
+  # 🔥 Merge
+  df <- left_join(meta_phy, meta_clean, by = "Patient_ID")
+  
+  # 🔥 FORCE Sample_ID again (critical fix)
+  df$Sample_ID <- phyloseq::sample_names(phy_obj)
+  
+  # Align samples
+  common_samples <- intersect(sample_names(phy_obj), df$Sample_ID)
+  
+  if(length(common_samples) == 0){
+    stop(paste("❌ No matching samples in", cohort_name))
+  }
+  
+  # Subset phyloseq
+  phy_obj <- prune_samples(common_samples, phy_obj)
+  
+  # Subset df
+  df <- df %>%
+    filter(Sample_ID %in% common_samples) %>%
+    distinct(Sample_ID, .keep_all = TRUE)
+  
+  # 🔥 CRITICAL: correct rownames
+  rownames(df) <- df$Sample_ID
+  
+  sample_data(phy_obj) <- sample_data(df)
+  
+  df$Cohort <- cohort_name
+  
+  return(list(phy = phy_obj, df = df))
+}
+
+disc <- prepare_phyloseq(phy_disc, "Discovery cohort", meta_clean)
+val1 <- prepare_phyloseq(phy_val1, "Validation cohort 1", meta_clean)
+val2 <- prepare_phyloseq(phy_val2, "Validation cohort 2", meta_clean)
+
+
+```
+
+
+
+```{r}
+
+clinical_vars <- c(
+  "Disease_state",
+  "Subgroup",
+  "Bloodculture_isolated_pathogen.x",
+  "Gestational_age",
+  "Birth_weight",
+  "Center",
+  "AB_ratio",
+  "Feeding_type",
+  "Mode_delivery",
+  "Week_of_life",
+  "Invasive_device",
+  "Storage_years"
+)
+
+run_permanova <- function(phy_obj, df, var) {
+  
+  df_sub <- df %>%
+    select(Sample_ID, Patient_ID, all_of(var)) %>%
+    drop_na()
+  
+  if(nrow(df_sub) < 5) return(NULL)
+  if(length(unique(df_sub[[var]])) < 2) return(NULL)
+  
+  dist_mat <- phyloseq::distance(phy_obj, method = "bray")
+  
+  dist_sub <- as.dist(as.matrix(dist_mat)[df_sub$Sample_ID, df_sub$Sample_ID])
+  
+  model <- vegan::adonis2(
+    dist_sub ~ df_sub[[var]],
+    permutations = 999,
+    strata = df_sub$Patient_ID
+  )
+  
+  data.frame(
+    Variable = var,
+    R2 = model$R2[1],
+    p = model$`Pr(>F)`[1]
+  )
+}
+
+library(purrr)
+
+run_cohort <- function(obj, cohort_name) {
+  
+  phy_obj <- obj$phy
+  df <- obj$df
+  
+  res <- map_df(clinical_vars, function(v) {
+    out <- run_permanova(phy_obj, df, v)
+    if(is.null(out)) return(NULL)
+    out
+  })
+  
+  res$Cohort <- cohort_name
+  return(res)
+}
+
+res_disc <- run_cohort(disc, "Discovery cohort")
+res_val1 <- run_cohort(val1, "Validation cohort 1")
+res_val2 <- run_cohort(val2, "Validation cohort 2")
+
+results_beta <- bind_rows(res_disc, res_val1, res_val2)
+
+```
+
+
+
+```{r}
+results_beta <- results_beta %>%
+  group_by(Cohort) %>%
+  mutate(p_adj = p.adjust(p, method = "fdr")) %>%
+  ungroup()
+
+results_beta <- results_beta %>%
+  mutate(
+    Variable_clean = case_when(
+      grepl("Gestational_age", Variable) ~ "Gestational age",
+      grepl("Week_of_life", Variable) ~ "Week of life",
+      grepl("Birth_weight", Variable) ~ "Birth weight",
+      grepl("Center", Variable) ~ "Center of birth",
+      grepl("AB_ratio", Variable) ~ "Antibiotic exposure",
+      grepl("Feeding_type", Variable) ~ "Feeding type",
+      grepl("Mode_delivery", Variable) ~ "Mode of delivery",
+      grepl("Invasive_device", Variable) ~ "Invasive device",
+      grepl("Storage_years", Variable) ~ "Storage duration",
+      TRUE ~ Variable
+    )
+  )
+
+library(ggplot2)
+
+ggplot(results_beta,
+       aes(x = Cohort,
+           y = reorder(Variable_clean, R2),
+           fill = R2)) +
+  
+  geom_tile(color = "white") +
+  
+  geom_text(
+    aes(label = ifelse(p_adj < 0.05, "*", "")),
+    size = 5
+  ) +
+  
+  scale_fill_gradient(low = "white", high = "red") +
+  
+  labs(
+    title = "Clinical drivers of beta-diversity (PERMANOVA)",
+    x = "Cohort",
+    y = "Clinical parameters",
+    fill = expression(R^2)
+  ) +
+  
+  theme_minimal(base_size = 12)
+```
+
+
+
+```{r}
+# Or Excel
+library(writexl)
+write_xlsx(results_beta,
+           "rawfileAB/beta_diversity_permanova_results_all_cohorts.xlsx")
+
+write.csv(res_disc,
+          "rawfileAB/permanova_discovery_cohort.csv",
+          row.names = FALSE)
+
+write.csv(res_val1,
+          "rawfileAB/permanova_validation1_cohort.csv",
+          row.names = FALSE)
+
+write.csv(res_val2,
+          "rawfileAB/permanova_validation2_cohort.csv",
+          row.names = FALSE)
+
+results_clean <- results_beta %>%
+  select(Cohort,
+         Variable = Variable_clean,
+         R2,
+         p_value = p,
+         FDR = p_adj) %>%
+  arrange(Cohort, desc(R2))
+
+write_xlsx(results_clean,
+           "rawfileAB/PERMANOVA_clean_results.xlsx")
+```
+
+
+
+
+
+
+
+```{r}
+summary(results_beta$p_adj)
+```
+
+
+
+```{r}
+
+results_beta <- results_beta %>%
+  mutate(across(c(Variable, Variable_clean), ~ gsub("\\.x$", "", .)))
+
+results_beta <- results_beta %>%
+  mutate(
+    signif_label = case_when(
+      R2 >= 0.20 ~ "***",
+      R2 >= 0.12 ~ "**",
+      R2 >= 0.02 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+
+ggplot(results_beta,
+       aes(x = Cohort,
+           y = reorder(Variable_clean, R2),
+           fill = R2)) +
+  
+  geom_tile(color = "white") +
+  
+  geom_text(
+    aes(label = signif_label),
+    size = 6,
+    color = "black"
+  ) +
+  
+  scale_fill_gradient(low = "white", high = "red") +
+  
+  labs(
+    title = "Clinical drivers of beta-diversity (PERMANOVA)",
+    x = "Cohort",
+    y = "Clinical parameters",
+    fill = expression(R^2)
+  ) +
+  
+  theme_minimal(base_size = 12)
+
+##
+
+```
+
+## Stars represent effect size based on R² thresholds (* ≥ 0.05, ** ≥ 0.10, *** ≥ 0.15), not statistical significance.
+
+```{r}
+p <- ggplot(results_beta,
+       aes(x = Cohort,
+           y = reorder(Variable_clean, R2),
+           fill = R2)) +
+  
+  geom_tile(color = "white") +
+  
+  geom_text(
+    aes(label = signif_label),
+    size = 6,
+    color = "black"
+  ) +
+  
+  scale_fill_gradient(low = "white", high = "red") +
+  
+  labs(
+    title = "Clinical drivers of beta-diversity (PERMANOVA)",
+    x = "Cohort",
+    y = "Clinical parameters",
+    fill = expression(R^2)
+  ) +
+  
+  theme_minimal(base_size = 12)
+
+ggsave(
+  filename = "figs/BetaDiversity_PERMANOVA_Heatmap.png",
+  plot = p,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  filename = "figs/BetaDiversity_PERMANOVA_Heatmap.pdf",
+  plot = p,
+  width = 10,
+  height = 8
+)
+
+```
+
+
+### till now ok
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+filname= "20260326_Overview samples for Animesh_addedclinicalparameters.xlsx"
+#phy.red <- readRDS("phyloseq_discDC_red.rds")
+
+phy_disc <- readRDS("phyloseq_discDC_red.rds")
+phy_val1 <- readRDS("phyloseq_val_one.rds")
+phy_val2 <- readRDS("phyloseq_val_two.rds")
+
+meta_phy <- data.frame(sample_data(phy_disc)) %>%
+  mutate(Sample_ID = rownames(.)) %>%
+  rename(Patient_ID = Patient.ID)
+
+meta <- read_excel(filname, sheet = "Metadata") %>%
+  rename(
+    Patient_ID = `Patient-ID`,
+    Gestational_age = `Gestational age (days)`,
+    Birth_weight = `Birth weight (grams)`,
+    Center = `Center of birth`,
+    AB_ratio = AB_IV_days_beforet0_ratio,
+    Feeding_type = `Feeding type at full enteral feeding`,
+    Mode_delivery = `Mode of delivery`,
+    Week_of_life = Sample_week_of_life,
+    Invasive_device = Invasive_medical_device_beforet0,
+    Storage_years = Storage_duration_years
+  )
+
+meta_clean <- meta %>%
+  group_by(Patient_ID) %>%
+  summarise(across(everything(), ~ first(na.omit(.))), .groups = "drop")
+
+df <- meta_phy %>%
+  select(-any_of("Cohort")) %>%   # remove duplicate if exists
+  left_join(meta_clean, by = "Patient_ID") %>%
+  filter(!is.na(Cohort))
+
+
+
+## may need code here 
+
+library(phyloseq)
+
+dist_mat <- phyloseq::distance(phy.red, method = "bray")
+
+clinical_vars <- c(
+  "Disease_state",
+  "Subgroup",
+  "Bloodculture_isolated_pathogen",
+  "Gestational_age",
+  "Birth_weight",
+  "Center",
+  "AB_ratio",
+  "Feeding_type",
+  "Mode_delivery",
+  "Invasive_device",
+  "Storage_years"
+)
+
+
+```
+
+```{r}
+
+colnames(df)
+```
+
+
+
+```{r}
+
+library(vegan)
+library(dplyr)
+
+run_permanova <- function(data, dist_mat, var){
+  
+  df_sub <- data %>%
+    select(Sample_ID, Patient_ID, all_of(var)) %>%
+    drop_na()
+  
+  if(nrow(df_sub) < 5) return(NULL)
+  
+  if(length(unique(df_sub[[var]])) < 2) return(NULL)
+  
+  # Match distance matrix
+  dist_sub <- as.dist(as.matrix(dist_mat)[df_sub$Sample_ID, df_sub$Sample_ID])
+  
+  formula <- as.formula(paste("dist_sub ~", var))
+  
+  model <- adonis2(
+    formula,
+    data = df_sub,
+    permutations = 999,
+    strata = df_sub$Patient_ID   # 🔥 repeated measures correction
+  )
+  
+  data.frame(
+    Variable = var,
+    R2 = model$R2[1],
+    p = model$`Pr(>F)`[1]
+  )
+}
+
+library(dplyr)
+library(purrr)
+
+results_beta <- df %>%
+  group_split(Cohort) %>%
+  purrr::map_df(function(subdf) {
+    
+    cohort_name <- unique(subdf$Cohort)
+    
+    res <- purrr::map_df(clinical_vars, function(v) {
+      out <- run_permanova(subdf, v)
+      if(is.null(out)) return(NULL)
+      out
+    })
+    
+    res$Cohort <- cohort_name
+    res
+  })
+
+results_beta <- results_beta %>%
+  group_by(Cohort) %>%
+  mutate(p_adj = p.adjust(p, method = "fdr")) %>%
+  ungroup()
+
+results_beta <- results_beta %>%
+  mutate(
+    Variable_clean = case_when(
+      grepl("Gestational_age", Variable) ~ "Gestational age",
+      grepl("Birth_weight", Variable) ~ "Birth weight",
+      grepl("Center", Variable) ~ "Center of birth",
+      grepl("AB_ratio", Variable) ~ "Antibiotic exposure",
+      grepl("Feeding_type", Variable) ~ "Feeding type",
+      grepl("Mode_delivery", Variable) ~ "Mode of delivery",
+      grepl("Invasive_device", Variable) ~ "Invasive device",
+      grepl("Storage_years", Variable) ~ "Storage duration",
+      TRUE ~ Variable
+    )
+  )
+
+library(ggplot2)
+
+ggplot(results_beta,
+       aes(x = Cohort,
+           y = reorder(Variable_clean, R2),
+           fill = R2)) +
+  
+  geom_tile(color = "white") +
+  
+  geom_text(
+    aes(label = ifelse(p_adj < 0.05, "*", "")),
+    size = 5
+  ) +
+  
+  scale_fill_gradient(low = "white", high = "red") +
+  
+  labs(
+    title = "Clinical drivers of beta-diversity (PERMANOVA)",
+    x = "Cohort",
+    y = "Clinical parameters",
+    fill = expression(R^2)
+  ) +
+  
+  theme_minimal(base_size = 12)
+
+```
+
+
+```{r}
+results_clean <- results %>%
+  filter(term != "(Intercept)") %>%
+  filter(!grepl("Disease_state", term)) %>%
+  mutate(
+    p_adj = p.adjust(p.value, method = "fdr"),
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01 ~ "**",
+      p_adj < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+results_clean <- results_clean %>%
+  mutate(
+    term_clean = case_when(
+      grepl("Bloodculture", term) ~ 
+        gsub("Bloodculture_isolated_pathogen", "", term),
+      grepl("Gestational_age", term) ~ "Gestational age",
+      grepl("Birth_weight", term) ~ "Birth weight",
+      grepl("Center", term) ~ "Center of birth",
+      grepl("AB_ratio", term) ~ "Antibiotic exposure",
+      grepl("Feeding_type", term) ~ "Feeding type",
+      grepl("Mode_delivery", term) ~ "Mode of delivery",
+      grepl("Invasive_device", term) ~ "Invasive device",
+      grepl("Storage_years", term) ~ "Storage duration",
+      TRUE ~ term
+    )
+  )
+
+ggplot(results_clean,
+       aes(x = estimate,
+           y = reorder(term_clean, estimate))) +
+  
+  geom_point(size = 3) +
+  
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0.2
+  ) +
+  
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  
+  geom_text(
+    aes(label = significance),
+    hjust = -0.3,
+    size = 4
+  ) +
+  
+  facet_grid(Alpha ~ Cohort, scales = "free_y") +
+  
+  labs(
+    x = "Effect size (β ± 95% CI)",
+    y = "Clinical parameters"
+  ) +
+  
+  theme_bw(base_size = 12)
+```
+
+
+
+
+```{r}
+
+
+results_clean <- results_clean %>%
+  mutate(
+    term_clean = case_when(
+      
+      grepl("Bloodculture_isolated_pathogen", term) ~ 
+        gsub("Bloodculture_isolated_pathogen\\.x", "", term) %>%
+        gsub("Bloodculture_isolated_pathogen\\.y", "", .),
+      
+      grepl("Gestational_age", term) ~ "Gestational age",
+      grepl("Birth_weight", term) ~ "Birth weight",
+      grepl("Center", term) ~ "Center of birth",
+      grepl("AB_ratio", term) ~ "Antibiotic exposure",
+      grepl("Feeding_type", term) ~ "Feeding type",
+      grepl("Mode_delivery", term) ~ "Mode of delivery",
+      grepl("Invasive_device", term) ~ "Invasive device",
+      grepl("Storage_years", term) ~ "Storage duration",
+      
+      TRUE ~ term
+    )
+  )
+
+library(stringr)
+
+results_clean <- results_clean %>%
+  mutate(term_clean = str_replace_all(term_clean, "^\\.", ""))  # remove leading dots
+
+
+plot_alpha <- function(alpha_name) {
+  
+  p <- results_clean %>%
+    filter(Alpha == alpha_name) %>%
+    ggplot(aes(x = estimate,
+               y = reorder(term_clean, estimate))) +
+    
+    geom_point(size = 3) +
+    
+    geom_errorbarh(
+      aes(xmin = conf.low, xmax = conf.high),
+      height = 0.2
+    ) +
+    
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    
+    geom_text(
+      aes(label = significance),
+      hjust = -0.3,
+      size = 4
+    ) +
+    
+    facet_wrap(~Cohort, ncol = 1, scales = "free_y") +
+    
+    labs(
+      title = paste("Alpha Diversity:", alpha_name),
+      x = "Effect size (β ± 95% CI)",
+      y = "Clinical parameters"
+    ) +
+    
+    theme_bw(base_size = 12)
+  
+  return(p)
+}
+
+p_shannon  <- plot_alpha("Shannon")
+p_simpson  <- plot_alpha("Simpson")
+p_observed <- plot_alpha("Observed")
+
+ggsave("figs/fig1-Shannon_effects.png", p_shannon, width = 8, height = 10)
+ggsave("figs/fig1-Simpson_effects.png", p_simpson, width = 8, height = 10)
+ggsave("figs/fig1-Observed_effects.png", p_observed, width = 8, height = 10)
+
+```
+
+
+
+
+```{r}
+plot_alpha <- function(alpha_name) {
+  
+  p <- results_clean %>%
+    filter(Alpha == alpha_name) %>%
+    ggplot(aes(x = estimate,
+               y = reorder(term_clean, estimate))) +
+    
+    geom_point(size = 3) +
+    
+    geom_errorbarh(
+      aes(xmin = conf.low, xmax = conf.high),
+      height = 0.2
+    ) +
+    
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    
+    geom_text(
+      aes(label = significance),
+      hjust = -0.3,
+      size = 4
+    ) +
+    
+    facet_wrap(~Cohort, ncol = 1, scales = "free_y") +
+    
+    labs(
+      title = paste("Alpha Diversity:", alpha_name),
+      x = "Effect size (β ± 95% CI)",
+      y = "Clinical parameters"
+    ) +
+    
+    theme_bw(base_size = 12)
+  
+  return(p)
+}
+
+p_shannon  <- plot_alpha("Shannon")
+p_simpson  <- plot_alpha("Simpson")
+p_observed <- plot_alpha("Observed")
+
+```
+
+
+```{r}
+names(results_clean)
+```
+
+
+
+```{r}
+
+table(df$Cohort)
+
+```
+
+How to interpret your figure (for paper)
+β > 0 → increases microbiome diversity
+β < 0 → decreases diversity
+CI crossing 0 → not significant
+Compare consistency across:
+Cohort A (discovery)
+Cohort B/C (validation)
+
+
+```{r}
+ggsave("Figure1_AlphaDiversity_ClinicalFactors.png",
+       width = 10, height = 6, dpi = 300)
+
+
+write.csv(results_clean,
+          "Figure1_LMM_results.csv",
+          row.names = FALSE)
+```
+
+
+
+
+
+
+

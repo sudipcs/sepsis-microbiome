@@ -1,0 +1,500 @@
+---
+title: "disc_selection"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2026-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installations for first use:
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("phyloseq")
+# 
+# if(!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("Maaslin2")
+# 
+# install.packages("Matrix")
+# install.packages("pgirmess")
+# install.packages("agricolae")
+# install.packages("ggpubr")
+# install.packages("gt")
+# install.packages("FSA")
+```
+
+
+#Load libraries and data:
+
+Required libraries:
+```{r}
+library(vegan)
+library (ggplot2)
+library(ggpubr)
+library(data.table)
+library(cowplot)
+
+library(readr)
+library(phyloseq)
+library(pgirmess)
+library(agricolae)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(FSA)
+library(Maaslin2)
+# https://huttenhower.sph.harvard.edu/maaslin2/
+library(tidyverse)
+library(lmerTest)
+
+```
+
+
+
+
+## change cohort here DC / SV1 2
+
+```{r}
+
+filname= "20260326_Overview samples for Animesh_addedclinicalparameters.xlsx"
+## change cohort here
+#phy.red <- readRDS("phyloseq_discDC_red.rds")
+phy.red <- readRDS("phyloseq_val_one.rds")  ## one/ two
+
+alpha <- estimate_richness(
+  phy.red,
+  measures = c("Shannon", "Simpson", "Observed")
+) %>%
+  rownames_to_column("Sample_ID")
+
+meta_phy <- data.frame(sample_data(phy.red)) %>%
+  mutate(Sample_ID = rownames(.)) %>%   # SAFE
+  rename(Patient_ID = Patient.ID)
+
+meta <- read_excel(filname, sheet = "Metadata") %>%
+  rename(
+    Patient_ID = `Patient-ID`,
+    Gestational_age = `Gestational age (days)`,
+    Birth_weight = `Birth weight (grams)`,
+  #  Center = `Center of birth`,
+    AB_ratio = AB_IV_days_beforet0_ratio,
+    Feeding_type = `Feeding type at full enteral feeding`,
+    Mode_delivery = `Mode of delivery`,
+    Week_of_life = Sample_week_of_life,
+    Invasive_device = Invasive_medical_device_beforet0,
+    Storage_years = Storage_duration_years
+  )
+
+
+meta_clean <- meta %>%
+  group_by(Patient_ID) %>%
+  summarise(across(everything(), ~ first(na.omit(.))), .groups = "drop")
+
+df <- alpha %>%
+  left_join(meta_phy, by = "Sample_ID") %>%
+  left_join(meta_clean, by = "Patient_ID")
+
+df <- df %>%
+  filter(!is.na(Cohort.x)) %>%
+  mutate(
+    Patient_ID = as.factor(Patient_ID),
+    Cohort = factor(Cohort.x,
+                    levels = c("Discovery cohort",
+                               "Validation cohort 1",
+                               "Validation cohort 2")),
+    
+    Disease_state = factor(
+      Disease_state,
+      levels = c(0, 1),
+      labels = c("No sepsis", "Sepsis")
+      ),
+   # Center = as.factor(Center),
+    Feeding_type = as.factor(Feeding_type),
+    Mode_delivery = as.factor(Mode_delivery),
+    Invasive_device = as.factor(Invasive_device)
+  )
+
+levels(df$Cohort)
+
+```
+
+
+
+
+```{r}
+
+alpha_measures <- c("Shannon", "Simpson", "Observed")
+
+clinical_vars <- c(
+  "Disease_state",
+  "Subgroup",
+  "Bloodculture_isolated_pathogen.x",
+  "Gestational_age",
+  "Birth_weight",
+  "AB_ratio",
+  "Feeding_type",
+  "Mode_delivery",
+  "Week_of_life",
+  "Invasive_device",
+  "Storage_years"
+)
+
+
+library(lmerTest)
+library(broom.mixed)
+library(purrr)
+
+run_models <- function(data, clinical_vars, alpha_var) {
+  
+  res <- lapply(clinical_vars, function(var) {
+    
+    df_sub <- data %>%
+      filter(!is.na(.data[[var]]),
+             !is.na(.data[[alpha_var]])) %>%
+      mutate(
+        Disease_state = droplevels(Disease_state)
+      )
+    
+    # check variation
+    has_disease_variation <- length(unique(df_sub$Disease_state)) == 2
+    
+    # basic checks
+    if(nrow(df_sub) < 5) return(NULL)
+    if(is.factor(df_sub[[var]]) && nlevels(df_sub[[var]]) < 2) return(NULL)
+    
+    # 🔥 enforce proper binary structure when possible
+    if(has_disease_variation){
+      df_sub$Disease_state <- factor(df_sub$Disease_state,
+                                     levels = c("No sepsis", "Sepsis"))
+    }
+    
+    # ✅ MODEL LOGIC
+    if(var == "Disease_state"){
+      
+      if(!has_disease_variation) return(NULL)
+      
+      formula <- as.formula(
+        paste(alpha_var, "~ Disease_state + (1 | Patient_ID)")
+      )
+      
+    } else {
+      
+      if(has_disease_variation){
+        
+        formula <- as.formula(
+          paste(alpha_var, "~", var, "+ Disease_state + (1 | Patient_ID)")
+        )
+        
+      } else {
+        
+        # drop Disease_state if no variation
+        formula <- as.formula(
+          paste(alpha_var, "~", var, "+ (1 | Patient_ID)")
+        )
+      }
+    }
+    
+    model <- tryCatch(
+      lmerTest::lmer(formula, data = df_sub),
+      error = function(e) return(NULL)
+    )
+    
+    if(is.null(model)) return(NULL)
+    
+    broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE) %>%
+      mutate(Variable = var, Alpha = alpha_var)
+  })
+  
+  dplyr::bind_rows(res)
+}
+
+
+## change here for cohort DC / SV1 2
+
+results <- df %>%
+  group_split(Cohort) %>%
+  map_df(function(subdf) {
+    
+    # cohort_name <- unique(subdf$Cohort)  ##  for DC
+    cohort_name <- "Validation cohort 1" #unique(subdf$Cohort)[1]   # ✅ FIX
+    #cohort_name <- unique(subdf$Cohort)
+    
+    map_df(alpha_measures, function(alpha_var) {
+      
+      res <- run_models(subdf, clinical_vars, alpha_var)
+      
+      if(nrow(res) == 0) return(NULL)
+      
+      res$Cohort <- cohort_name
+      res
+    })
+  })
+
+```
+
+
+```{r}
+str(results)
+nrow(results)
+colnames(results)
+```
+
+
+```{r}
+
+
+results_clean <- results %>%
+  filter(term != "(Intercept)") %>%
+ ## filter(!grepl("Disease_state", term)) %>%
+  mutate(
+    p_adj = p.adjust(p.value, method = "fdr"),
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01 ~ "**",
+      p_adj < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+
+results_clean <- results_clean %>%
+  mutate(
+    term_clean = case_when(
+      grepl("Bloodculture", term) ~ 
+      gsub("Bloodculture_isolated_pathogen", "", term),
+      grepl("Disease_state", term) ~ "Disease state",
+      grepl("Gestational_age", term) ~ "Gestational age",
+      grepl("Birth_weight", term) ~ "Birth weight",
+    #  grepl("Center", term) ~ "Center of birth",
+      grepl("AB_ratio", term) ~ "Antibiotic exposure",
+      grepl("Week_of_life", term) ~ "Week of life",
+      grepl("Feeding_type", term) ~ "Feeding type",
+      grepl("Mode_delivery", term) ~ "Mode of delivery",
+      grepl("Invasive_device", term) ~ "Invasive device",
+      grepl("Storage_years", term) ~ "Storage duration",
+      TRUE ~ term
+    )
+  )
+
+
+```
+
+
+
+"Disease_state"
+```{r}
+
+
+results_clean <- results_clean %>%
+  mutate(
+    term_clean = case_when(
+      
+      grepl("Bloodculture_isolated_pathogen", term) ~ 
+      gsub("Bloodculture_isolated_pathogen\\.x", "", term) %>%
+      gsub("Bloodculture_isolated_pathogen\\.y", "", .),
+      grepl("Disease_state", term) ~ "Disease state",
+      grepl("Gestational_age", term) ~ "Gestational age",
+      grepl("Birth_weight", term) ~ "Birth weight",
+    #  grepl("Center", term) ~ "Center of birth",
+      grepl("AB_ratio", term) ~ "Antibiotic exposure",
+      grepl("Week_of_life", term) ~ "Week of life",
+      grepl("Feeding_type", term) ~ "Feeding type",
+      grepl("Mode_delivery", term) ~ "Mode of delivery",
+      grepl("Invasive_device", term) ~ "Invasive device",
+      grepl("Storage_years", term) ~ "Storage duration",
+      
+      TRUE ~ term
+    )
+  )
+
+library(stringr)
+
+results_clean <- results_clean %>%
+  mutate(term_clean = str_replace_all(term_clean, "^\\.", ""))  # remove leading dots
+
+results_clean <- results_clean %>%
+  filter(
+    !grepl("Bloodculture_isolated_pathogen", term) | 
+    grepl("Escherichia coli", term)
+  )
+
+results_clean <- results_clean %>%
+  filter(!(Variable != "Disease_state" & grepl("Disease_state", term)))
+
+plot_alpha <- function(alpha_name) {
+  
+  p <- results_clean %>%
+    filter(Alpha == alpha_name) %>%
+    ggplot(aes(x = estimate,
+               y = reorder(term_clean, estimate))) +
+    
+    geom_point(size = 3) +
+    
+    geom_errorbarh(
+      aes(xmin = conf.low, xmax = conf.high),
+      height = 0.2
+    ) +
+    
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    
+    geom_text(
+      aes(label = significance),
+      hjust = -0.3,
+      size = 4
+    ) +
+    
+    facet_wrap(~Cohort, ncol = 1, scales = "free_y") +
+    
+    labs(
+      title = paste("Alpha Diversity:", alpha_name),
+      x = "Effect size (β ± 95% CI)",
+      y = "Clinical parameters"
+    ) +
+    
+    theme_bw(base_size = 12)
+  
+  return(p)
+}
+
+p_shannon  <- plot_alpha("Shannon")
+p_simpson  <- plot_alpha("Simpson")
+p_observed <- plot_alpha("Observed")
+
+p_shannon
+p_simpson
+p_observed
+#ggsave("alphafigs/fig1-DC-Shannon_effects.png", p_shannon, width = 8, height = 10)
+#ggsave("alphafigs/fig1-DC-Simpson_effects.png", p_simpson, width = 8, height = 10)
+#ggsave("alphafigs/fig1-DC-Observed_effects.png", p_observed, width = 8, height = 10)
+
+ggsave("alphafigs/fig1-SV1-Shannon_effects.png", p_shannon, width = 8, height = 10)
+ggsave("alphafigs/fig1-SV1-Simpson_effects.png", p_simpson, width = 8, height = 10)
+ggsave("alphafigs/fig1-SV1-Observed_effects.png", p_observed, width = 8, height = 10)
+
+
+```
+
+
+## raw file save
+
+```{r}
+
+library(writexl)
+write_xlsx(results,
+           "rawfileAB/alpha_SV2-diversity_mixed_models_raw.xlsx")
+
+results_export <- results_clean %>%
+  select(
+    Cohort,
+    Alpha,
+    Variable,
+    term = term_clean,
+    estimate,
+    conf.low,
+    conf.high,
+    p_value = p.value,
+    FDR = p_adj,
+    significance
+  ) %>%
+  arrange(Cohort, Alpha, desc(abs(estimate)))
+
+#write_xlsx(results_export, "rawfileAB/alpha_DC-diversity_results_clean.xlsx")
+
+```
+
+
+```{r}
+table(df$Disease_state)
+unique(results$term)
+
+```
+
+
+```{r}
+plot_alpha <- function(alpha_name) {
+  
+  p <- results_clean %>%
+    filter(Alpha == alpha_name) %>%
+    ggplot(aes(x = estimate,
+               y = reorder(term_clean, estimate))) +
+    
+    geom_point(size = 3) +
+    
+    geom_errorbarh(
+      aes(xmin = conf.low, xmax = conf.high),
+      height = 0.2
+    ) +
+    
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    
+    geom_text(
+      aes(label = significance),
+      hjust = -0.3,
+      size = 4
+    ) +
+    
+    facet_wrap(~Cohort, ncol = 1, scales = "free_y") +
+    
+    labs(
+      title = paste("Alpha Diversity:", alpha_name),
+      x = "Effect size (β ± 95% CI)",
+      y = "Clinical parameters"
+    ) +
+    
+    theme_bw(base_size = 12)
+  
+  return(p)
+}
+
+p_shannon  <- plot_alpha("Shannon")
+p_simpson  <- plot_alpha("Simpson")
+p_observed <- plot_alpha("Observed")
+
+```
+
+
+```{r}
+names(results_clean)
+```
+
+
+
+```{r}
+
+table(df$Cohort)
+
+```
+
+How to interpret your figure (for paper)
+β > 0 → increases microbiome diversity
+β < 0 → decreases diversity
+CI crossing 0 → not significant
+Compare consistency across:
+Cohort A (discovery)
+Cohort B/C (validation)
+
+
+```{r}
+ggsave("Figure1_AlphaDiversity_ClinicalFactors.png",
+       width = 10, height = 6, dpi = 300)
+
+
+write.csv(results_clean,
+          "Figure1_LMM_results.csv",
+          row.names = FALSE)
+```
+
+
+
+
+
+
+
